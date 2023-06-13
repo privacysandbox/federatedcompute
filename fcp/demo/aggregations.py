@@ -14,31 +14,25 @@
 """Action handlers for the Aggregations service."""
 
 import asyncio
-from collections.abc import Callable, Sequence
 import contextlib
+import copy
 import dataclasses
 import enum
 import functools
 import http
-import queue
 import threading
-from typing import Optional
+from typing import Callable, Dict, Optional, Sequence, Set, Tuple
 import uuid
 
 from absl import logging
 
 from google.longrunning import operations_pb2
-from google.rpc import code_pb2
-from fcp.aggregation.protocol import aggregation_protocol_messages_pb2 as apm_pb2
-from fcp.aggregation.protocol import configuration_pb2
-from fcp.aggregation.protocol.python import aggregation_protocol
-from fcp.aggregation.tensorflow.python import aggregation_protocols
 from fcp.demo import http_actions
 from fcp.demo import media
+from fcp.demo import plan_utils
 from fcp.protos import plan_pb2
 from fcp.protos.federatedcompute import aggregations_pb2
 from fcp.protos.federatedcompute import common_pb2
-from pybind11_abseil import status as absl_status
 
 
 class AggregationStatus(enum.Enum):
@@ -89,23 +83,11 @@ class AggregationRequirements:
   plan: plan_pb2.Plan
 
 
-@dataclasses.dataclass
-class _ActiveClientData:
-  """Information about an active client."""
-  # The client's identifier in the aggregation protocol.
-  client_id: int
-  # Queue receiving the final status of the client connection (if closed by the
-  # aggregation protocol). At most one value will be written.
-  close_status: queue.SimpleQueue[absl_status.Status]
-  # The name of the resource to which the client should write its update.
-  resource_name: str
-
-
 @dataclasses.dataclass(eq=False)
 class _WaitData:
   """Information about a pending wait operation."""
   # The condition under which the wait should complete.
-  num_inputs_aggregated_and_included: Optional[int]
+  num_inputs_aggregated_and_pending: Optional[int]
   # The loop the caller is waiting on.
   loop: asyncio.AbstractEventLoop = dataclasses.field(
       default_factory=asyncio.get_running_loop)
@@ -114,79 +96,22 @@ class _WaitData:
       default_factory=asyncio.Future)
 
 
-class _AggregationProtocolCallback(
-    aggregation_protocol.AggregationProtocol.Callback):
-  """AggregationProtocol.Callback that writes events to queues."""
-
-  def __init__(self, on_abort: Callable[[], None]):
-    """Constructs a new _AggregationProtocolCallback..
-
-    Args:
-      on_abort: A callback invoked if/when Abort is called.
-    """
-    super().__init__()
-    # When a client is accepted after calling AggregationProtocol.AddClients,
-    # this queue receives the new client's id as well as a queue that will
-    # provide the diagnostic status when the client is closed. (The status
-    # queue is being used as a future and will only receive one element.)
-    self.accepted_clients: queue.SimpleQueue[tuple[
-        int, queue.SimpleQueue[absl_status.Status]]] = queue.SimpleQueue()
-    # A queue receiving the final result of the aggregation session: either the
-    # aggregated tensors or a failure status. This queue is being used as a
-    # future and will only receive one element.
-    self.result: queue.SimpleQueue[bytes | absl_status.Status] = (
-        queue.SimpleQueue())
-
-    self._on_abort = on_abort
-    self._client_results_lock = threading.Lock()
-    # A map from client id to the queue for each client's close status.
-    self._client_results: dict[int, queue.SimpleQueue[absl_status.Status]] = {}
-
-  def OnAcceptClients(self, start_client_id: int, num_clients: int,
-                      message: apm_pb2.AcceptanceMessage) -> None:
-    with self._client_results_lock:
-      for client_id in range(start_client_id, start_client_id + num_clients):
-        q = queue.SimpleQueue()
-        self._client_results[client_id] = q
-        self.accepted_clients.put((client_id, q))
-
-  def OnSendServerMessage(self, client_id: int,
-                          message: apm_pb2.ServerMessage) -> None:
-    raise NotImplementedError()
-
-  def OnCloseClient(self, client_id: int,
-                    diagnostic_status: absl_status.Status) -> None:
-    with self._client_results_lock:
-      self._client_results.pop(client_id).put(diagnostic_status)
-
-  def OnComplete(self, result: bytes) -> None:
-    self.result.put(result)
-
-  def OnAbort(self, diagnostic_status: absl_status.Status) -> None:
-    self.result.put(diagnostic_status)
-    self._on_abort()
-
-
 @dataclasses.dataclass(eq=False)
 class _AggregationSessionState:
   """Internal state for an aggregation session."""
   # The session's aggregation requirements.
   requirements: AggregationRequirements
-  # The AggregationProtocol.Callback object receiving protocol events.
-  callback: _AggregationProtocolCallback
-  # The protocol performing the aggregation. Service._sessions_lock should not
-  # be held while AggregationProtocol methods are invoked -- both because
-  # methods may be slow and because callbacks may also need to acquire the lock.
-  agg_protocol: aggregation_protocol.AggregationProtocol
+  # The TensorFlow aggregation session.
+  agg_session: plan_utils.IntermediateAggregationSession
   # The current status of the session.
-  status: AggregationStatus = AggregationStatus.PENDING
-  # Unredeemed client authorization tokens.
-  authorization_tokens: set[str] = dataclasses.field(default_factory=set)
-  # Information about active clients, keyed by authorization token
-  active_clients: dict[str, _ActiveClientData] = dataclasses.field(
-      default_factory=dict)
+  status: SessionStatus = dataclasses.field(default_factory=SessionStatus)
+  # Tokens for active clients. Once a client has contributed, its token is
+  # removed.
+  client_tokens: Set[str] = dataclasses.field(default_factory=set)
+  # Media service handles for pending uploads, keyed by client token.
+  pending_uploads: Dict[str, str] = dataclasses.field(default_factory=dict)
   # Information for in-progress wait calls on this session.
-  pending_waits: set[_WaitData] = dataclasses.field(default_factory=set)
+  pending_waits: Set[_WaitData] = dataclasses.field(default_factory=set)
 
 
 class Service:
@@ -196,70 +121,42 @@ class Service:
                media_service: media.Service):
     self._forwarding_info = forwarding_info
     self._media_service = media_service
-    self._sessions: dict[str, _AggregationSessionState] = {}
+    self._sessions: Dict[str, _AggregationSessionState] = {}
     self._sessions_lock = threading.Lock()
 
   def create_session(self,
                      aggregation_requirements: AggregationRequirements) -> str:
     """Creates a new aggregation session and returns its id."""
     session_id = str(uuid.uuid4())
-    callback = _AggregationProtocolCallback(
-        functools.partial(self._handle_protocol_abort, session_id))
-    if (len(aggregation_requirements.plan.phase) != 1 or
-        not aggregation_requirements.plan.phase[0].HasField('server_phase_v2')):
-      raise ValueError('Plan must contain exactly one server_phase_v2.')
-
-    # NOTE: For simplicity, this implementation only creates a single,
-    # in-process aggregation shard. In a production implementation, there should
-    # be multiple shards running on separate servers to enable high rates of
-    # client contributions. Utilities for combining results from separate shards
-    # are still in development as of Jan 2023.
-    agg_protocol = aggregation_protocols.create_simple_aggregation_protocol(
-        configuration_pb2.Configuration(aggregation_configs=[
-            self._translate_server_aggregation_config(aggregation_config)
-            for aggregation_config in
-            aggregation_requirements.plan.phase[0].server_phase_v2.aggregations
-        ]), callback)
-    agg_protocol.Start(0)
+    agg_session = plan_utils.IntermediateAggregationSession(
+        aggregation_requirements.plan)
 
     with self._sessions_lock:
       self._sessions[session_id] = _AggregationSessionState(
-          requirements=aggregation_requirements,
-          callback=callback,
-          agg_protocol=agg_protocol)
+          requirements=aggregation_requirements, agg_session=agg_session)
     return session_id
 
   def complete_session(
-      self, session_id: str) -> tuple[SessionStatus, Optional[bytes]]:
+      self, session_id: str) -> Tuple[SessionStatus, Optional[bytes]]:
     """Completes the aggregation session and returns its results."""
     with self._sessions_lock:
       state = self._sessions.pop(session_id)
 
     try:
-      # Only complete the AggregationProtocol if it's still pending. The most
-      # likely alternative is that it's ABORTED due to an error generated by the
-      # protocol itself.
-      status = self._get_session_status(state)
-      if status.status != AggregationStatus.PENDING:
-        return self._get_session_status(state), None
-
-      # Ensure privacy requirements have been met.
-      if (state.agg_protocol.GetStatus().num_inputs_aggregated_and_included <
+      if (state.status.num_inputs_aggregated_and_pending <
           state.requirements.minimum_clients_in_server_published_aggregate):
-        state.agg_protocol.Abort()
         raise ValueError(
             'minimum_clients_in_server_published_aggregate has not been met.')
-
-      state.agg_protocol.Complete()
-      result = state.callback.result.get(timeout=1)
-      if isinstance(result, absl_status.Status):
-        raise absl_status.StatusNotOk(result)
-      state.status = AggregationStatus.COMPLETED
-      return self._get_session_status(state), result
-    except (ValueError, absl_status.StatusNotOk, queue.Empty) as e:
-      logging.warning('Failed to complete aggregation session: %s', e)
-      state.status = AggregationStatus.FAILED
-      return self._get_session_status(state), None
+      result = state.agg_session.finalize()
+      state.status.status = AggregationStatus.COMPLETED
+      state.status.num_inputs_aggregated_and_included += (
+          state.status.num_inputs_aggregated_and_pending)
+      state.status.num_inputs_aggregated_and_pending = 0
+      return state.status, result
+    except ValueError as e:
+      logging.warning('Failed to finalize aggregation session: %s', e)
+      state.status.status = AggregationStatus.FAILED
+      return state.status, None
     finally:
       self._cleanup_session(state)
 
@@ -267,53 +164,52 @@ class Service:
     """Aborts/cancels an aggregation session."""
     with self._sessions_lock:
       state = self._sessions.pop(session_id)
-
-    # Only abort the AggregationProtocol if it's still pending. The most likely
-    # alternative is that it's ABORTED due to an error generated by the protocol
-    # itself.
-    if state.status == AggregationStatus.PENDING:
-      state.status = AggregationStatus.ABORTED
-      state.agg_protocol.Abort()
-
+    state.status.status = AggregationStatus.ABORTED
+    # Cleaning up the session will mark all pending clients as aborted and all
+    # pending inputs as discarded. Since no results will be returned, all
+    # completed inputs should also be considered discarded.
+    state.status.num_inputs_discarded += (
+        state.status.num_inputs_aggregated_and_included)
+    state.status.num_inputs_aggregated_and_included = 0
     self._cleanup_session(state)
-    return self._get_session_status(state)
+    return state.status
 
   def get_session_status(self, session_id: str) -> SessionStatus:
     """Returns the status of an aggregation session."""
     with self._sessions_lock:
-      return self._get_session_status(self._sessions[session_id])
+      return copy.deepcopy(self._sessions[session_id].status)
 
   async def wait(
       self,
       session_id: str,
-      num_inputs_aggregated_and_included: Optional[int] = None
-  ) -> SessionStatus:
+      num_inputs_aggregated_and_pending: Optional[int] = None) -> SessionStatus:
     """Blocks until all conditions are satisfied or the aggregation fails."""
     with self._sessions_lock:
       state = self._sessions[session_id]
       # Check if any of the conditions are already satisfied.
-      status = self._get_session_status(state)
-      if (num_inputs_aggregated_and_included is None or
-          num_inputs_aggregated_and_included <=
-          status.num_inputs_aggregated_and_included):
-        return status
+      if (num_inputs_aggregated_and_pending is None or
+          num_inputs_aggregated_and_pending <=
+          state.status.num_inputs_aggregated_and_pending):
+        return copy.deepcopy(state.status)
 
-      wait_data = _WaitData(num_inputs_aggregated_and_included)
+      wait_data = _WaitData(num_inputs_aggregated_and_pending)
       state.pending_waits.add(wait_data)
     return await wait_data.status_future
 
   def pre_authorize_clients(self, session_id: str,
                             num_tokens: int) -> Sequence[str]:
     """Generates tokens authorizing clients to contribute to the session."""
-    tokens = set(str(uuid.uuid4()) for _ in range(num_tokens))
+    tokens = [str(uuid.uuid4()) for _ in range(num_tokens)]
     with self._sessions_lock:
-      self._sessions[session_id].authorization_tokens |= tokens
-    return list(tokens)
+      self._sessions[session_id].client_tokens |= set(tokens)
+    return tokens
 
+#TODO: Review this new code from merge conflict resolution
+"""
   def _translate_intrinsic_arg(
       self, intrinsic_arg: plan_pb2.ServerAggregationConfig.IntrinsicArg
   ) -> configuration_pb2.Configuration.ServerAggregationConfig.IntrinsicArg:
-    """Transform an aggregation intrinsic arg for the aggregation service."""
+    ""Transform an aggregation intrinsic arg for the aggregation service.""
     if intrinsic_arg.HasField('input_tensor'):
       return configuration_pb2.Configuration.ServerAggregationConfig.IntrinsicArg(
           input_tensor=intrinsic_arg.input_tensor)
@@ -328,7 +224,7 @@ class Service:
   def _translate_server_aggregation_config(
       self, plan_aggregation_config: plan_pb2.ServerAggregationConfig
   ) -> configuration_pb2.Configuration.ServerAggregationConfig:
-    """Transform the aggregation config for use by the aggregation service."""
+    ""Transform the aggregation config for use by the aggregation service.""
     if plan_aggregation_config.inner_aggregations:
       raise AssertionError('Nested intrinsic structrues are not supported yet.')
     return configuration_pb2.Configuration.ServerAggregationConfig(
@@ -338,64 +234,31 @@ class Service:
             for intrinsic_arg in plan_aggregation_config.intrinsic_args
         ],
         output_tensors=plan_aggregation_config.output_tensors)
+"""
 
-  def _get_session_status(self,
-                          state: _AggregationSessionState) -> SessionStatus:
-    """Returns the SessionStatus for an _AggregationSessionState object."""
-    status = state.agg_protocol.GetStatus()
-    return SessionStatus(
-        status=state.status,
-        num_clients_completed=status.num_clients_completed,
-        num_clients_failed=status.num_clients_failed,
-        num_clients_pending=status.num_clients_pending,
-        num_clients_aborted=status.num_clients_aborted,
-        num_inputs_aggregated_and_included=(
-            status.num_inputs_aggregated_and_included),
-        num_inputs_aggregated_and_pending=(
-            status.num_inputs_aggregated_and_pending),
-        num_inputs_discarded=status.num_inputs_discarded)
-
-  def _get_http_status(self, code: absl_status.StatusCode) -> http.HTTPStatus:
-    """Returns the HTTPStatus code for an absl StatusCode."""
-    if (code == absl_status.StatusCode.INVALID_ARGUMENT or
-        code == absl_status.StatusCode.FAILED_PRECONDITION):
-      return http.HTTPStatus.BAD_REQUEST
-    elif code == absl_status.StatusCode.NOT_FOUND:
-      return http.HTTPStatus.NOT_FOUND
-    else:
-      return http.HTTPStatus.INTERNAL_SERVER_ERROR
 
   def _cleanup_session(self, state: _AggregationSessionState) -> None:
     """Cleans up the session and releases any resources.
 
+    Any pending clients are considered failed.
+
     Args:
       state: The session state to clean up.
     """
-    state.authorization_tokens.clear()
-    for client_data in state.active_clients.values():
-      self._media_service.finalize_upload(client_data.resource_name)
-    state.active_clients.clear()
-    # Anyone waiting on the session should be notified that it's finished.
-    if state.pending_waits:
-      status = self._get_session_status(state)
-      for data in state.pending_waits:
-        data.loop.call_soon_threadsafe(
-            functools.partial(data.status_future.set_result, status))
-      state.pending_waits.clear()
-
-  def _handle_protocol_abort(self, session_id: str) -> None:
-    """Notifies waiting clients when the protocol is aborted."""
-    with self._sessions_lock:
-      with contextlib.suppress(KeyError):
-        state = self._sessions[session_id]
-        state.status = AggregationStatus.FAILED
-        # Anyone waiting on the session should be notified it's been aborted.
-        if state.pending_waits:
-          status = self._get_session_status(state)
-          for data in state.pending_waits:
-            data.loop.call_soon_threadsafe(
-                functools.partial(data.status_future.set_result, status))
-          state.pending_waits.clear()
+    state.agg_session.close()
+    state.status.num_clients_aborted += state.status.num_clients_pending
+    state.status.num_clients_pending = 0
+    state.status.num_inputs_discarded += (
+        state.status.num_inputs_aggregated_and_pending)
+    state.status.num_inputs_aggregated_and_pending = 0
+    state.client_tokens.clear()
+    for name in state.pending_uploads.values():
+      self._media_service.finalize_upload(name)
+    state.pending_uploads.clear()
+    for data in state.pending_waits:
+      data.loop.call_soon_threadsafe(
+          functools.partial(data.queue.put_nowait, state.status))
+    state.pending_waits.clear()
 
   @http_actions.proto_action(
       service='google.internal.federatedcompute.v1.Aggregations',
@@ -409,19 +272,17 @@ class Service:
         state = self._sessions[request.aggregation_id]
       except KeyError as e:
         raise http_actions.HttpError(http.HTTPStatus.NOT_FOUND) from e
-      try:
-        state.authorization_tokens.remove(request.authorization_token)
-      except KeyError as e:
-        raise http_actions.HttpError(http.HTTPStatus.UNAUTHORIZED) from e
+      if request.authorization_token not in state.client_tokens:
+        raise http_actions.HttpError(http.HTTPStatus.UNAUTHORIZED)
+      if request.authorization_token in state.pending_uploads:
+        # The client should not have already called StartAggregationDataUpload.
+        raise http_actions.HttpError(http.HTTPStatus.BAD_REQUEST)
+      upload_name = self._media_service.register_upload()
+      state.pending_uploads[request.authorization_token] = upload_name
+      state.status.num_clients_pending += 1
 
-    state.agg_protocol.AddClients(1)
+    # TODO: is client_token needed? Picked up when resolving a merge conflict
     client_token = str(uuid.uuid4())
-    client_id, close_status = state.callback.accepted_clients.get(timeout=1)
-    upload_name = self._media_service.register_upload()
-
-    with self._sessions_lock:
-      state.active_clients[client_token] = _ActiveClientData(
-          client_id, close_status, upload_name)
 
     forwarding_info = self._forwarding_info()
     response = aggregations_pb2.StartAggregationDataUploadResponse(
@@ -436,36 +297,8 @@ class Service:
     op.response.Pack(response)
     return op
 
-  @http_actions.proto_action(
-      service='google.internal.federatedcompute.v1.Aggregations',
-      method='SubmitAggregationResult')
-  def submit_aggregation_result(
-      self, request: aggregations_pb2.SubmitAggregationResultRequest
-  ) -> aggregations_pb2.SubmitAggregationResultResponse:
-    """Handles a SubmitAggregationResult request."""
-    with self._sessions_lock:
-      try:
-        state = self._sessions[request.aggregation_id]
-      except KeyError as e:
-        raise http_actions.HttpError(http.HTTPStatus.NOT_FOUND) from e
-      try:
-        client_data = state.active_clients.pop(request.client_token)
-      except KeyError as e:
-        raise http_actions.HttpError(http.HTTPStatus.UNAUTHORIZED) from e
-
-    # Ensure the client is using the resource name provided when they called
-    # StartAggregationDataUpload.
-    if request.resource_name != client_data.resource_name:
-      raise http_actions.HttpError(http.HTTPStatus.BAD_REQUEST)
-
-    # The aggregation protocol may have already closed the connect (e.g., if
-    # an error occurred). If so, clean up the upload and return the error.
-    if not client_data.close_status.empty():
-      with contextlib.suppress(KeyError):
-        self._media_service.finalize_upload(request.resource_name)
-      raise http_actions.HttpError(
-          self._get_http_status(client_data.close_status.get().code()))
-
+    # TODO: Review this merge conflict code
+"""
     # Finalize the upload.
     try:
       update = self._media_service.finalize_upload(request.resource_name)
@@ -495,23 +328,68 @@ class Service:
       # bad state -- likely leading to it being aborted.
       logging.warning('Failed to receive client input: %s', e)
       raise http_actions.HttpError(http.HTTPStatus.INTERNAL_SERVER_ERROR) from e
+"""
 
-    # Wait for the client input to be processed.
-    close_status = client_data.close_status.get()
-    if not close_status.ok():
-      raise http_actions.HttpError(self._get_http_status(close_status.code()))
-
-    # Check for any newly-satisfied pending wait operations.
+  @http_actions.proto_action(
+      service='google.internal.federatedcompute.v1.Aggregations',
+      method='SubmitAggregationResult')
+  def submit_aggregation_result(
+      self, request: aggregations_pb2.SubmitAggregationResultRequest
+  ) -> aggregations_pb2.SubmitAggregationResultResponse:
+    """Handles a SubmitAggregationResult request."""
     with self._sessions_lock:
-      if state.pending_waits:
+      try:
+        state = self._sessions[request.aggregation_id]
+      except KeyError as e:
+        raise http_actions.HttpError(http.HTTPStatus.NOT_FOUND) from e
+      if request.client_token not in state.client_tokens:
+        raise http_actions.HttpError(http.HTTPStatus.UNAUTHORIZED)
+      # Ensure the client is using the resource name provided when they called
+      # StartAggregationDataUpload.
+      if (request.resource_name != state.pending_uploads.get(
+          request.client_token)):
+        raise http_actions.HttpError(http.HTTPStatus.BAD_REQUEST)
+
+      def record_failure():
+        state.status.num_clients_pending -= 1
+        state.status.num_clients_failed += 1
+
+      # Mark the client session as complete; the client will need to be
+      # recorded as either completed or failed.
+      state.client_tokens.remove(request.client_token)
+      with contextlib.ExitStack() as stack:
+        stack.callback(record_failure)
+        try:
+          update = self._media_service.finalize_upload(request.resource_name)
+        except KeyError as e:
+          raise http_actions.HttpError(http.HTTPStatus.BAD_REQUEST) from e
+        finally:
+          del state.pending_uploads[request.client_token]
+        # Ensure data was actually uploaded.
+        if update is None:
+          raise http_actions.HttpError(http.HTTPStatus.BAD_REQUEST)
+
+        try:
+          state.agg_session.accumulate_client_update(update)
+        except ValueError as e:
+          raise http_actions.HttpError(http.HTTPStatus.BAD_REQUEST) from e
+
+        # Record the successful aggregation.
+        stack.pop_all()
+        state.status.num_clients_pending -= 1
+        state.status.num_clients_completed += 1
+        state.status.num_inputs_aggregated_and_pending += 1
+
+        # Check for any newly-satisfied pending wait operations.
         completed_waits = set()
-        status = self._get_session_status(state)
         for data in state.pending_waits:
-          if (data.num_inputs_aggregated_and_included is not None and
-              status.num_inputs_aggregated_and_included >=
-              data.num_inputs_aggregated_and_included):
+          if (data.num_inputs_aggregated_and_pending is not None and
+              state.status.num_inputs_aggregated_and_pending >=
+              data.num_inputs_aggregated_and_pending):
             data.loop.call_soon_threadsafe(
-                functools.partial(data.status_future.set_result, status))
+                # TODO: Review this new code from merge conflict resoltuion
+                #functools.partial(data.status_future.set_result, status))
+                functools.partial(data.queue.put_nowait, state.status))
             completed_waits.add(data)
         state.pending_waits -= completed_waits
     return aggregations_pb2.SubmitAggregationResultResponse()
@@ -529,26 +407,16 @@ class Service:
       except KeyError as e:
         raise http_actions.HttpError(http.HTTPStatus.NOT_FOUND) from e
       try:
-        client_data = state.active_clients.pop(request.client_token)
+        state.client_tokens.remove(request.client_token)
       except KeyError as e:
         raise http_actions.HttpError(http.HTTPStatus.UNAUTHORIZED) from e
+      try:
+        del state.pending_uploads[request.client_token]
+      except KeyError as e:
+        raise http_actions.HttpError(http.HTTPStatus.BAD_REQUEST) from e
 
-    # Attempt to finalize the in-progress upload to free up resources.
-    with contextlib.suppress(KeyError):
-      self._media_service.finalize_upload(client_data.resource_name)
-
-    # Notify the aggregation protocol that the client has left.
-    if request.status.code == code_pb2.Code.OK:
-      status = absl_status.Status.OkStatus()
-    else:
-      status = absl_status.BuildStatusNotOk(
-          absl_status.StatusCodeFromInt(request.status.code),
-          request.status.message)
-    state.agg_protocol.CloseClient(client_data.client_id, status)
-    # Since we're initiating the close, it's also necessary to notify the
-    # _AggregationProtocolCallback so it can clean up resources.
-    state.callback.OnCloseClient(client_data.client_id, status)
-
+      state.status.num_clients_pending -= 1
+      state.status.num_clients_failed += 1
     logging.debug('[%s] AbortAggregation: %s', request.aggregation_id,
                   request.status)
     return aggregations_pb2.AbortAggregationResponse()
