@@ -29,13 +29,10 @@ from fcp.protos import plan_pb2
 from fcp.tensorflow import serve_slices as serve_slices_registry
 
 
-class Session:
-  """A session for performing L2 Plan operations.
+class _BaseSession:
+  """Base class for a Plan-based TensorFlow session."""
 
-  This class only supports loading a single intermediate update.
-  """
-
-  def __init__(self, plan: plan_pb2.Plan, checkpoint: bytes):
+  def __init__(self, plan: plan_pb2.Plan):
     if len(plan.phase) != 1:
       raise ValueError('plan must contain exactly 1 phase.')
     if not plan.phase[0].HasField('server_phase'):
@@ -52,27 +49,8 @@ class Session:
       tf.import_graph_def(graph_def, name='')
     self._session = tf.compat.v1.Session(graph=graph)
     self._plan = plan
-    self._restore_state(plan.server_savepoint, checkpoint)
-    self._maybe_run(plan.phase[0].server_phase.phase_init_op)
 
-    serve_slices_calls = []
-
-    def record_serve_slices_call(*args):
-      served_at_id = str(uuid.uuid4())
-      serve_slices_calls.append((served_at_id, args))
-      return served_at_id
-
-    with serve_slices_registry.register_serve_slices_callback(
-        record_serve_slices_call
-    ) as token:
-      self._client_checkpoint = self._save_state(
-          plan.phase[0].server_phase.write_client_init, session_token=token
-      )
-    self._slices = {
-        k: self._build_slices(*args) for k, args in serve_slices_calls
-    }
-
-  def __enter__(self) -> 'Session':
+  def __enter__(self) -> '_BaseSession':
     self._session.__enter__()
     return self
 
@@ -166,6 +144,56 @@ class Session:
         with open(tmpfile.name, 'rb') as f:
           slices.append(f.read())
     return slices
+
+class IntermediateAggregationSession(_BaseSession):
+  """A session for performing L1 Plan operations."""
+
+  def __init__(self, plan: plan_pb2.Plan):
+    super().__init__(plan)
+    self._maybe_run(plan.phase[0].server_phase.phase_init_op)
+
+  def accumulate_client_update(self, client_update: bytes) -> None:
+    """Loads and incorporates a client update."""
+    self._restore_state(self._plan.phase[0].server_phase.read_update,
+                        client_update)
+    self._maybe_run(
+        self._plan.phase[0].server_phase.aggregate_into_accumulators_op)
+
+  def finalize(self) -> bytes:
+    """Returns a checkpoint containing the aggregated result."""
+    # read_aggregated_update is only used by the SecAgg protocol, which this
+    # implementation does not yet support.
+    return self._save_state(
+        self._plan.phase[0].server_phase.write_intermediate_update)
+
+
+class Session(_BaseSession):
+  """A session for performing L2 Plan operations.
+
+  This class only supports loading a single intermediate update.
+  """
+
+  def __init__(self, plan: plan_pb2.Plan, checkpoint: Optional[bytes]):
+    super().__init__(plan)
+    self._restore_state(plan.server_savepoint, checkpoint)
+    self._maybe_run(plan.phase[0].server_phase.phase_init_op)
+
+    serve_slices_calls = []
+
+    def record_serve_slices_call(*args):
+      served_at_id = str(uuid.uuid4())
+      serve_slices_calls.append((served_at_id, args))
+      return served_at_id
+
+    with serve_slices_registry.register_serve_slices_callback(
+        record_serve_slices_call
+    ) as token:
+      self._client_checkpoint = self._save_state(
+          plan.phase[0].server_phase.write_client_init, session_token=token
+      )
+    self._slices = {
+        k: self._build_slices(*args) for k, args in serve_slices_calls
+    }
 
   @functools.cached_property
   def client_plan(self) -> bytes:
