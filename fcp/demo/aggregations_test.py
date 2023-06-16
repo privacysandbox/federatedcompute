@@ -127,7 +127,7 @@ class AggregationsTest(absltest.TestCase, unittest.IsolatedAsyncioTestCase):
       submit_response = service.submit_aggregation_result(
           aggregations_pb2.SubmitAggregationResultRequest(
               aggregation_id=session_id,
-              client_token=start_upload_response.client_token,
+              client_token=tokens[0],
               resource_name=start_upload_response.resource.resource_name))
       self.assertEqual(submit_response,
                        aggregations_pb2.SubmitAggregationResultResponse())
@@ -178,7 +178,7 @@ class AggregationsTest(absltest.TestCase, unittest.IsolatedAsyncioTestCase):
     service.submit_aggregation_result(
         aggregations_pb2.SubmitAggregationResultRequest(
             aggregation_id=session_id,
-            client_token=start_upload_response.client_token,
+            client_token=tokens[0],
             resource_name=start_upload_response.resource.resource_name))
 
     # Complete the session before there are 2 completed clients.
@@ -236,7 +236,7 @@ class AggregationsTest(absltest.TestCase, unittest.IsolatedAsyncioTestCase):
     service.submit_aggregation_result(
         aggregations_pb2.SubmitAggregationResultRequest(
             aggregation_id=session_id,
-            client_token=start_upload_response.client_token,
+            client_token=tokens[0],
             resource_name=start_upload_response.resource.resource_name))
 
     # Start a partial upload from a second client.
@@ -298,7 +298,7 @@ class AggregationsTest(absltest.TestCase, unittest.IsolatedAsyncioTestCase):
     service.submit_aggregation_result(
         aggregations_pb2.SubmitAggregationResultRequest(
             aggregation_id=session_id,
-            client_token=start_upload_response.client_token,
+            client_token=tokens[0],
             resource_name=start_upload_response.resource.resource_name))
 
     # The awaitable should now return.
@@ -334,7 +334,7 @@ class AggregationsTest(absltest.TestCase, unittest.IsolatedAsyncioTestCase):
     service.submit_aggregation_result(
         aggregations_pb2.SubmitAggregationResultRequest(
             aggregation_id=session_id,
-            client_token=start_upload_response.client_token,
+            client_token=tokens[0],
             resource_name=start_upload_response.resource.resource_name))
 
     # Since a client has already reported, the condition should already be
@@ -613,7 +613,7 @@ class AggregationsTest(absltest.TestCase, unittest.IsolatedAsyncioTestCase):
       service.submit_aggregation_result(
           aggregations_pb2.SubmitAggregationResultRequest(
               aggregation_id=session_id,
-              client_token=start_upload_response.client_token,
+              client_token=tokens[0],
               resource_name=start_upload_response.resource.resource_name))
     self.assertEqual(cm.exception.code, http.HTTPStatus.BAD_REQUEST)
     self.assertEqual(
@@ -644,7 +644,7 @@ class AggregationsTest(absltest.TestCase, unittest.IsolatedAsyncioTestCase):
         service.abort_aggregation(
             aggregations_pb2.AbortAggregationRequest(
                 aggregation_id=session_id,
-                client_token=start_upload_response.client_token)),
+                client_token=tokens[0])),
         aggregations_pb2.AbortAggregationResponse())
     self.assertEqual(
         service.get_session_status(session_id),
@@ -674,7 +674,7 @@ class AggregationsTest(absltest.TestCase, unittest.IsolatedAsyncioTestCase):
       service.abort_aggregation(
           aggregations_pb2.AbortAggregationRequest(
               aggregation_id='does-not-exist',
-              client_token=start_upload_response.client_token))
+              client_token=tokens[0]))
     self.assertEqual(cm.exception.code, http.HTTPStatus.NOT_FOUND)
     self.assertEqual(
         service.get_session_status(session_id),

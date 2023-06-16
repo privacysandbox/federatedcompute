@@ -91,9 +91,8 @@ class _WaitData:
   # The loop the caller is waiting on.
   loop: asyncio.AbstractEventLoop = dataclasses.field(
       default_factory=asyncio.get_running_loop)
-  # The future to which the SessionStatus will be written once the wait is over.
-  status_future: asyncio.Future[SessionStatus] = dataclasses.field(
-      default_factory=asyncio.Future)
+  # The queue to which the SessionStatus will be written once the wait is over.
+  queue: asyncio.Queue = dataclasses.field(default_factory=asyncio.Queue)
 
 
 @dataclasses.dataclass(eq=False)
@@ -194,7 +193,7 @@ class Service:
 
       wait_data = _WaitData(num_inputs_aggregated_and_pending)
       state.pending_waits.add(wait_data)
-    return await wait_data.status_future
+    return await wait_data.queue.get()
 
   def pre_authorize_clients(self, session_id: str,
                             num_tokens: int) -> Sequence[str]:
@@ -203,39 +202,6 @@ class Service:
     with self._sessions_lock:
       self._sessions[session_id].client_tokens |= set(tokens)
     return tokens
-
-#TODO: Review this new code from merge conflict resolution
-"""
-  def _translate_intrinsic_arg(
-      self, intrinsic_arg: plan_pb2.ServerAggregationConfig.IntrinsicArg
-  ) -> configuration_pb2.Configuration.ServerAggregationConfig.IntrinsicArg:
-    ""Transform an aggregation intrinsic arg for the aggregation service.""
-    if intrinsic_arg.HasField('input_tensor'):
-      return configuration_pb2.Configuration.ServerAggregationConfig.IntrinsicArg(
-          input_tensor=intrinsic_arg.input_tensor)
-    elif intrinsic_arg.HasField('state_tensor'):
-      raise ValueError(
-          'Non-client intrinsic args are not supported in this demo.'
-      )
-    else:
-      raise AssertionError(
-          'Cases should have exhausted all possible types of intrinsic args.')
-
-  def _translate_server_aggregation_config(
-      self, plan_aggregation_config: plan_pb2.ServerAggregationConfig
-  ) -> configuration_pb2.Configuration.ServerAggregationConfig:
-    ""Transform the aggregation config for use by the aggregation service.""
-    if plan_aggregation_config.inner_aggregations:
-      raise AssertionError('Nested intrinsic structrues are not supported yet.')
-    return configuration_pb2.Configuration.ServerAggregationConfig(
-        intrinsic_uri=plan_aggregation_config.intrinsic_uri,
-        intrinsic_args=[
-            self._translate_intrinsic_arg(intrinsic_arg)
-            for intrinsic_arg in plan_aggregation_config.intrinsic_args
-        ],
-        output_tensors=plan_aggregation_config.output_tensors)
-"""
-
 
   def _cleanup_session(self, state: _AggregationSessionState) -> None:
     """Cleans up the session and releases any resources.
@@ -281,54 +247,17 @@ class Service:
       state.pending_uploads[request.authorization_token] = upload_name
       state.status.num_clients_pending += 1
 
-    # TODO: is client_token needed? Picked up when resolving a merge conflict
-    client_token = str(uuid.uuid4())
-
     forwarding_info = self._forwarding_info()
     response = aggregations_pb2.StartAggregationDataUploadResponse(
         aggregation_protocol_forwarding_info=forwarding_info,
         resource=common_pb2.ByteStreamResource(
             data_upload_forwarding_info=forwarding_info,
-            resource_name=upload_name),
-        client_token=client_token)
+            resource_name=upload_name))
 
     op = operations_pb2.Operation(name=f'operations/{uuid.uuid4()}', done=True)
     op.metadata.Pack(aggregations_pb2.StartAggregationDataUploadMetadata())
     op.response.Pack(response)
     return op
-
-    # TODO: Review this merge conflict code
-"""
-    # Finalize the upload.
-    try:
-      update = self._media_service.finalize_upload(request.resource_name)
-      if update is None:
-        raise absl_status.StatusNotOk(
-            absl_status.invalid_argument_error(
-                'Aggregation result never uploaded'))
-    except (KeyError, absl_status.StatusNotOk) as e:
-      if isinstance(e, KeyError):
-        e = absl_status.StatusNotOk(
-            absl_status.internal_error('Failed to finalize upload'))
-      state.agg_protocol.CloseClient(client_data.client_id, e.status)
-      # Since we're initiating the close, it's also necessary to notify the
-      # _AggregationProtocolCallback so it can clean up resources.
-      state.callback.OnCloseClient(client_data.client_id, e.status)
-      raise http_actions.HttpError(self._get_http_status(
-          e.status.code())) from e
-
-    client_message = apm_pb2.ClientMessage(
-        simple_aggregation=apm_pb2.ClientMessage.SimpleAggregation(
-            input=apm_pb2.ClientResource(inline_bytes=update)))
-    try:
-      state.agg_protocol.ReceiveClientMessage(client_data.client_id,
-                                              client_message)
-    except absl_status.StatusNotOk as e:
-      # ReceiveClientInput should only fail if the AggregationProtocol is in a
-      # bad state -- likely leading to it being aborted.
-      logging.warning('Failed to receive client input: %s', e)
-      raise http_actions.HttpError(http.HTTPStatus.INTERNAL_SERVER_ERROR) from e
-"""
 
   @http_actions.proto_action(
       service='google.internal.federatedcompute.v1.Aggregations',
@@ -387,8 +316,6 @@ class Service:
               state.status.num_inputs_aggregated_and_pending >=
               data.num_inputs_aggregated_and_pending):
             data.loop.call_soon_threadsafe(
-                # TODO: Review this new code from merge conflict resoltuion
-                #functools.partial(data.status_future.set_result, status))
                 functools.partial(data.queue.put_nowait, state.status))
             completed_waits.add(data)
         state.pending_waits -= completed_waits
