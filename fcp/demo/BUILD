@@ -267,6 +267,7 @@ py_library(
     name = "server",
     srcs = ["server.py"],
     srcs_version = "PY3",
+    visibility = ["//visibility:public"],
     deps = [
         ":aggregations",
         ":eligibility_eval_tasks",
