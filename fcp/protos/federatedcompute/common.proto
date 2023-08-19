@@ -76,8 +76,7 @@ message Resource {
 
   message InlineResource {
     // The inlined data for the resource.
-    bytes data = 1
-        ;
+    bytes data = 1;
 
     // The compression used for the inlined data, or unset if the data is
     // uncompressed.
@@ -112,9 +111,19 @@ enum ResourceCompressionFormat {
   RESOURCE_COMPRESSION_FORMAT_GZIP = 1;
 }
 
-// Currently empty message which is sent when client (device) is rejected for
-// participation and is not assigned a task.
-message RejectionInfo {}
+// Next id: 1004
+message RejectionInfo {
+  RejectionReason.Enum reason = 1001;
+
+  // Metadata for client to take next action.
+  oneof metadata {
+    // Retry after a period of time.
+    RetryWindow retry_window = 1002;
+
+    // Auth required
+    AuthChallenge auth_challenge = 1003;
+  }
+}
 
 // A suggestion to the client when to retry the connection to the service next
 // time
@@ -130,6 +139,26 @@ message RetryWindow {
   // calling before min. If the client calls after max, the likelihood to be
   // rejected again is higher.
   google.protobuf.Duration delay_max = 2;
+}
+
+// Next id: 3
+message RejectionReason {
+  enum Enum {
+    // Unknown status.
+    UNKNOWN = 0;
+
+    // There is no available task to join.
+    NO_TASK_AVAILABLE = 1;
+
+    // No permission to do the operation.
+    UNAUTHORIZED = 2;
+  }
+}
+
+// Next id: 2
+message AuthChallenge {
+  // challenge nonce.
+  string nonce = 1;
 }
 
 // Information about where to upload data (e.g. aggregation results, client
