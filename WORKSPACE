@@ -143,7 +143,7 @@ load("@com_google_api_gax_java//:repositories.bzl", "com_google_api_gax_java_rep
 
 com_google_api_gax_java_repositories()
 
-# Tensorflow v2.12.0
+# Tensorflow v2.13.0
 http_archive(
     name = "org_tensorflow",
     patch_tool = "patch",
@@ -151,10 +151,6 @@ http_archive(
         # This patch enables googleapi Java and Python proto rules such as
         # @com_google_googleapis//google/rpc:rpc_java_proto.
         "//fcp/patches:tensorflow_googleapis_proto_rules.patch",
-        # This patch works around failures in GitHub infrastructure to
-        # download versions of LLVM pointed to by non-HEAD TensorFlow.
-        # TODO(team): Remove this patch when resolved.
-        "//fcp/patches:tensorflow_llvm_url.patch",
         # TensorFlow's custom pybind11 BUILD file is missing the osx config
         # setting expected by pybind11_bazel.
         "//fcp/patches:tensorflow_pybind11_osx.patch",
@@ -166,10 +162,10 @@ http_archive(
         # TensorFlow's build rule for zlib only exports the latter.
         "//fcp/patches:tensorflow_zlib.patch",
     ],
-    sha256 = "c030cb1905bff1d2446615992aad8d8d85cbe90c4fb625cee458c63bf466bc8e",
-    strip_prefix = "tensorflow-2.12.0",
+    sha256 = "e58c939079588623e6fa1d054aec2f90f95018266e0a970fd353a5244f5173dc",
+    strip_prefix = "tensorflow-2.13.0",
     urls = [
-        "https://github.com/tensorflow/tensorflow/archive/v2.12.0.tar.gz",
+        "https://github.com/tensorflow/tensorflow/archive/v2.13.0.tar.gz",
     ],
 )
 

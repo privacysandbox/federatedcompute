@@ -1,4 +1,4 @@
-# Copyright 2022 Google LLC
+# Copyright 2023 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,33 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-default_visibility = [
-    "//fcp:internal",
-]
-
 package(
-    default_visibility = default_visibility,
     licenses = ["notice"],  # Apache 2.0
 )
 
-cc_library(
-    name = "more_jni_util",
-    hdrs = ["more_jni_util.h"],
+java_test(
+    name = "TensorflowPlanSessionTest",
+    srcs = ["TensorflowPlanSessionTest.java"],
+    resources = ["//fcp/java_src/test/java/com/google/fcp/testdata"],
     deps = [
-        ":jni_util",
-        "//fcp/base",
-        "@bazel_tools//tools/jdk:jni",
-    ],
-)
-
-cc_library(
-    name = "jni_util",
-    hdrs = ["jni_util.h"],
-    deps = [
-        "//fcp/base",
-        "@bazel_tools//tools/jdk:jni",
-        "@com_google_absl//absl/cleanup",
-        "@com_google_absl//absl/container:fixed_array",
+        "//fcp/java_src/main/java/com/google/fcp/plan",
+        "@com_google_protobuf//java/core",
+        "@fcp_maven//:com_google_guava_guava",
+        "@fcp_maven//:com_google_truth_truth",
+        "@fcp_maven//:junit_junit",
     ],
 )
