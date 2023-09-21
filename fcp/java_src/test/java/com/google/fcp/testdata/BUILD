@@ -19,9 +19,11 @@ package(
 filegroup(
     name = "testdata",
     srcs = [
+        "expected_10x_checkpoint.ckp",
         "expected_checkpoint.ckp",
         "gradient.ckp",
         "init_checkpoint.ckp",
+        "intermediate_10x_checkpoint.ckp",
         "intermediate_checkpoint.ckp",
         "plan.pb",
     ],

@@ -14,10 +14,8 @@
 package com.google.fcp.plan;
 
 import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertFalse;
 
 import com.google.protobuf.ByteString;
-import java.util.Arrays;
 import java.util.Optional;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -130,18 +128,18 @@ public class TensorflowPlanSessionTest {
     ByteString result = phaseSession.toIntermediateUpdate();
 
     // Assert result
-    assertFalse(Arrays.equals(
-        getClass().getResourceAsStream("/com/google/fcp/testdata/intermediate_checkpoint.ckp")
-            .readAllBytes(), result.toByteArray()));
+    assertArrayEquals(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/intermediate_10x_checkpoint.ckp")
+            .readAllBytes(), result.toByteArray());
 
     // Apply update
     phaseSession.accumulateIntermediateUpdate(result);
     phaseSession.applyAggregatedUpdates();
     ByteString newCheckpoint = phaseSession.toCheckpoint();
 
-    assertFalse(Arrays.equals(
-        getClass().getResourceAsStream("/com/google/fcp/testdata/expected_checkpoint.ckp")
-            .readAllBytes(), newCheckpoint.toByteArray()));
+    assertArrayEquals(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/expected_10x_checkpoint.ckp")
+            .readAllBytes(), newCheckpoint.toByteArray());
 
     // Clean native resources
     phaseSession.close();
