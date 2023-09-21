@@ -22,8 +22,8 @@ java_test(
     deps = [
         "//fcp/java_src/main/java/com/google/fcp/plan",
         "@com_google_protobuf//java/core",
-        "@fcp_maven//:com_google_guava_guava",
-        "@fcp_maven//:com_google_truth_truth",
-        "@fcp_maven//:junit_junit",
+        "@maven//:com_google_guava_guava",
+        "@maven//:com_google_truth_truth",
+        "@maven//:junit_junit",
     ],
 )

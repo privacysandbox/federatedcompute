@@ -70,7 +70,7 @@ public final class TensorflowPlanSession implements PlanSession {
    * Instead, it selects the subset of information that it needs, in the most efficient form that is
    * required for operation of the service.
    */
-  TensorflowPlanSession(ByteString planBytes) {
+  public TensorflowPlanSession(ByteString planBytes) {
     Preconditions.checkNotNull(planBytes);
     Preconditions.checkArgument(!planBytes.isEmpty(), "PlanBytes cannot be empty");
 

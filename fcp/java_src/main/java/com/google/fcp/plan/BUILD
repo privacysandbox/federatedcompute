@@ -29,7 +29,7 @@ java_library(
         "//fcp/java_src/main/java/com/google/fcp/tensorflow:protos_all_java_proto",
         "//fcp/protos:plan_java_proto",
         "@com_google_protobuf//java/core",
-        "@fcp_maven//:com_google_code_findbugs_jsr305",
-        "@fcp_maven//:com_google_guava_guava",
+        "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:com_google_guava_guava",
     ],
 )
