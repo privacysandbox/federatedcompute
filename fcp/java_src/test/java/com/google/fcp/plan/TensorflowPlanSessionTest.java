@@ -14,8 +14,10 @@
 package com.google.fcp.plan;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertFalse;
 
 import com.google.protobuf.ByteString;
+import java.util.Arrays;
 import java.util.Optional;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -25,7 +27,7 @@ import org.junit.runners.JUnit4;
 public class TensorflowPlanSessionTest {
 
   @Test
-  public void testCreatePhaseSession() throws Exception {
+  public void testCreatePhaseSessionSingleGradient() throws Exception {
     ByteString checkpoint = ByteString.copyFrom(
         getClass().getResourceAsStream("/com/google/fcp/testdata/init_checkpoint.ckp")
             .readAllBytes());
@@ -64,6 +66,84 @@ public class TensorflowPlanSessionTest {
 
     // Clean native resources
     updatePhaseSession.close();
+    phaseSession.close();
+  }
+
+  @Test
+  public void testCreatePhaseSessionSingleSession() throws Exception {
+    ByteString checkpoint = ByteString.copyFrom(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/init_checkpoint.ckp")
+            .readAllBytes());
+    ByteString gradient = ByteString.copyFrom(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/gradient.ckp").readAllBytes());
+    ByteString plan = ByteString.copyFrom(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/plan.pb").readAllBytes());
+
+    // Create tensorflow session
+    PlanSession planSession = new TensorflowPlanSession(plan);
+    PhaseSession phaseSession = planSession.createPhaseSession(Optional.of(checkpoint));
+
+    // Perform aggregation with gradient
+    phaseSession.accumulateClientUpdate(gradient);
+
+    // Finalize aggregation
+    ByteString result = phaseSession.toIntermediateUpdate();
+
+    // Assert result
+    assertArrayEquals(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/intermediate_checkpoint.ckp")
+            .readAllBytes(), result.toByteArray());
+
+    // Apply update
+    phaseSession.accumulateIntermediateUpdate(result);
+    phaseSession.applyAggregatedUpdates();
+    ByteString newCheckpoint = phaseSession.toCheckpoint();
+
+    assertArrayEquals(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/expected_checkpoint.ckp")
+            .readAllBytes(), newCheckpoint.toByteArray());
+
+    // Clean native resources
+    phaseSession.close();
+  }
+
+  @Test
+  public void testCreatePhaseSessionMultipleGradient() throws Exception {
+    ByteString checkpoint = ByteString.copyFrom(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/init_checkpoint.ckp")
+            .readAllBytes());
+    ByteString gradient = ByteString.copyFrom(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/gradient.ckp").readAllBytes());
+    ByteString plan = ByteString.copyFrom(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/plan.pb").readAllBytes());
+
+    // Create tensorflow session
+    PlanSession planSession = new TensorflowPlanSession(plan);
+    PhaseSession phaseSession = planSession.createPhaseSession(Optional.of(checkpoint));
+
+    // Perform aggregation with gradient
+    for (int i = 0; i < 10; i++) {
+      phaseSession.accumulateClientUpdate(gradient);
+    }
+
+    // Finalize aggregation
+    ByteString result = phaseSession.toIntermediateUpdate();
+
+    // Assert result
+    assertFalse(Arrays.equals(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/intermediate_checkpoint.ckp")
+            .readAllBytes(), result.toByteArray()));
+
+    // Apply update
+    phaseSession.accumulateIntermediateUpdate(result);
+    phaseSession.applyAggregatedUpdates();
+    ByteString newCheckpoint = phaseSession.toCheckpoint();
+
+    assertFalse(Arrays.equals(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/expected_checkpoint.ckp")
+            .readAllBytes(), newCheckpoint.toByteArray()));
+
+    // Clean native resources
     phaseSession.close();
   }
 }
