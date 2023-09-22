@@ -14,8 +14,10 @@
 package com.google.fcp.plan;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertNotNull;
 
 import com.google.protobuf.ByteString;
+import java.util.Map;
 import java.util.Optional;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -58,9 +60,22 @@ public class TensorflowPlanSessionTest {
     updatePhaseSession.applyAggregatedUpdates();
     ByteString newCheckpoint = updatePhaseSession.toCheckpoint();
 
+    // Produce Metrics
+    Map<String, Double> metrics = updatePhaseSession.getMetrics();
+    assertNotNull(metrics.get("server/client_work/train/binary_accuracy"));
+    assertNotNull(metrics.get("server/client_work/train/binary_crossentropy"));
+    assertNotNull(metrics.get("server/client_work/train/recall"));
+    assertNotNull(metrics.get("server/client_work/train/precision"));
+    assertNotNull(metrics.get("server/client_work/train/auc-roc"));
+    assertNotNull(metrics.get("server/client_work/train/auc-pr"));
+
+    // Produce server checkpoint
     assertArrayEquals(
         getClass().getResourceAsStream("/com/google/fcp/testdata/expected_checkpoint.ckp")
             .readAllBytes(), newCheckpoint.toByteArray());
+
+    // Produce client checkpoint
+    assertNotNull(updatePhaseSession.getClientCheckpoint(Optional.empty()));
 
     // Clean native resources
     updatePhaseSession.close();
@@ -100,6 +115,24 @@ public class TensorflowPlanSessionTest {
     assertArrayEquals(
         getClass().getResourceAsStream("/com/google/fcp/testdata/expected_checkpoint.ckp")
             .readAllBytes(), newCheckpoint.toByteArray());
+
+    // Produce Metrics
+    Map<String, Double> metrics = phaseSession.getMetrics();
+    assertNotNull(metrics.get("server/client_work/train/binary_accuracy"));
+    assertNotNull(metrics.get("server/client_work/train/binary_crossentropy"));
+    assertNotNull(metrics.get("server/client_work/train/recall"));
+    assertNotNull(metrics.get("server/client_work/train/precision"));
+    assertNotNull(metrics.get("server/client_work/train/auc-roc"));
+    assertNotNull(metrics.get("server/client_work/train/auc-pr"));
+
+    // Produce client checkpoint
+    assertNotNull(phaseSession.getClientCheckpoint(Optional.empty()));
+
+    // Produce server checkpoint
+    assertArrayEquals(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/expected_checkpoint.ckp")
+            .readAllBytes(), newCheckpoint.toByteArray());
+
 
     // Clean native resources
     phaseSession.close();
