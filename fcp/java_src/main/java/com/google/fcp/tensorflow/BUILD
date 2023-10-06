@@ -44,3 +44,9 @@ java_proto_library(
         "@org_tensorflow//tensorflow/core:protos_all",
     ],
 )
+
+java_library(
+    name = "tensorflow_exception",
+    srcs = ["TensorflowException.java"],
+    deps=[],
+)
