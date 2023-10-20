@@ -89,11 +89,6 @@ class FederatedDataSourceTest(absltest.TestCase):
                  ])),
             ]), tff.CLIENTS))
 
-  def test_capabilities(self):
-    ds = fds.FederatedDataSource(POPULATION_NAME, EXAMPLE_SELECTOR)
-    self.assertListEqual(ds.capabilities,
-                         [tff.program.Capability.SUPPORTS_REUSE])
-
   def test_iterator_federated_type(self):
     ds = fds.FederatedDataSource(POPULATION_NAME, EXAMPLE_SELECTOR)
     self.assertEqual(ds.iterator().federated_type, ds.federated_type)
@@ -114,14 +109,14 @@ class FederatedDataSourceTest(absltest.TestCase):
         ),
     )
 
-  def test_iterator_select_with_invalid_num_clients(self):
+  def test_iterator_select_with_invalid_k(self):
     ds = fds.FederatedDataSource(POPULATION_NAME, EXAMPLE_SELECTOR)
-    with self.assertRaisesRegex(ValueError, 'num_clients must be positive'):
-      ds.iterator().select(num_clients=None)
-    with self.assertRaisesRegex(ValueError, 'num_clients must be positive'):
-      ds.iterator().select(num_clients=-5)
-    with self.assertRaisesRegex(ValueError, 'num_clients must be positive'):
-      ds.iterator().select(num_clients=0)
+    with self.assertRaisesRegex(ValueError, 'k must be positive'):
+      ds.iterator().select(k=None)
+    with self.assertRaisesRegex(ValueError, 'k must be positive'):
+      ds.iterator().select(k=-5)
+    with self.assertRaisesRegex(ValueError, 'k must be positive'):
+      ds.iterator().select(k=0)
 
 
 if __name__ == '__main__':

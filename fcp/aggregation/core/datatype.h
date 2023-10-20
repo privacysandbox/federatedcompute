@@ -62,6 +62,14 @@ enum DataType {
 
 namespace internal {
 
+// The type kind, which indicates what sort of operations are valid to
+// perform on the type.
+enum TypeKind {
+  kUnknown = 0,
+  kNumeric = 1,
+  kString = 2,
+};
+
 // This struct is used to map typename T to DataType and specify other traits
 // of typename T.
 template <typename T>
@@ -69,19 +77,20 @@ struct TypeTraits {
   constexpr static DataType kDataType = DT_INVALID;
 };
 
-#define MATCH_TYPE_AND_DTYPE(TYPE, DTYPE)        \
-  template <>                                    \
-  struct TypeTraits<TYPE> {                      \
-    constexpr static DataType kDataType = DTYPE; \
+#define MATCH_TYPE_AND_DTYPE(TYPE, DTYPE, TYPE_KIND) \
+  template <>                                        \
+  struct TypeTraits<TYPE> {                          \
+    constexpr static DataType kDataType = DTYPE;     \
+    constexpr static TypeKind type_kind = TYPE_KIND; \
   }
 
 // Mapping of native types to DT_ types.
 // TODO(team): Add other types.
-MATCH_TYPE_AND_DTYPE(float, DT_FLOAT);
-MATCH_TYPE_AND_DTYPE(double, DT_DOUBLE);
-MATCH_TYPE_AND_DTYPE(int32_t, DT_INT32);
-MATCH_TYPE_AND_DTYPE(int64_t, DT_INT64);
-MATCH_TYPE_AND_DTYPE(string_view, DT_STRING);
+MATCH_TYPE_AND_DTYPE(float, DT_FLOAT, TypeKind::kNumeric);
+MATCH_TYPE_AND_DTYPE(double, DT_DOUBLE, TypeKind::kNumeric);
+MATCH_TYPE_AND_DTYPE(int32_t, DT_INT32, TypeKind::kNumeric);
+MATCH_TYPE_AND_DTYPE(int64_t, DT_INT64, TypeKind::kNumeric);
+MATCH_TYPE_AND_DTYPE(string_view, DT_STRING, TypeKind::kString);
 
 // The macros DTYPE_CASE and DTYPE_CASES are used to translate Tensor DataType
 // to strongly typed calls of code parameterized with the template typename
@@ -105,20 +114,46 @@ MATCH_TYPE_AND_DTYPE(string_view, DT_STRING);
     break;                                      \
   }
 
+#define DTYPE_CASES_BEGIN(TYPE_ENUM) switch (TYPE_ENUM) {
+#define DTYPE_CASES_END(TYPE_ENUM)                      \
+  case DT_INVALID:                                      \
+    FCP_LOG(FATAL) << "Invalid type";                   \
+    break;                                              \
+  default:                                              \
+    FCP_LOG(FATAL) << "Unsupported type " << TYPE_ENUM; \
+    }
+
+#define DTYPE_FLOATING_CASES(TYPE_ARG, STMTS) \
+  DTYPE_CASE(float, TYPE_ARG, STMTS)          \
+  DTYPE_CASE(double, TYPE_ARG, STMTS)
+
+#define DTYPE_INTEGER_CASES(TYPE_ARG, STMTS) \
+  DTYPE_CASE(int32_t, TYPE_ARG, STMTS)       \
+  DTYPE_CASE(int64_t, TYPE_ARG, STMTS)
+
+#define DTYPE_NUMERICAL_CASES(TYPE_ARG, STMTS) \
+  DTYPE_FLOATING_CASES(TYPE_ARG, STMTS)        \
+  DTYPE_INTEGER_CASES(TYPE_ARG, STMTS)
+
+#define DTYPE_STRING_CASES(TYPE_ARG, STMTS) \
+  DTYPE_CASE(string_view, TYPE_ARG, STMTS)
+
 // TODO(team): Add other types.
-#define DTYPE_CASES(TYPE_ENUM, TYPE_ARG, STMTS)          \
-  switch (TYPE_ENUM) {                                   \
-    DTYPE_CASE(float, TYPE_ARG, SINGLE_ARG(STMTS))       \
-    DTYPE_CASE(double, TYPE_ARG, SINGLE_ARG(STMTS))      \
-    DTYPE_CASE(int32_t, TYPE_ARG, SINGLE_ARG(STMTS))     \
-    DTYPE_CASE(int64_t, TYPE_ARG, SINGLE_ARG(STMTS))     \
-    DTYPE_CASE(string_view, TYPE_ARG, SINGLE_ARG(STMTS)) \
-    case DT_INVALID:                                     \
-      FCP_LOG(FATAL) << "Invalid type";                  \
-      break;                                             \
-    default:                                             \
-      FCP_LOG(FATAL) << "Unknown type";                  \
-  }
+#define DTYPE_CASES(TYPE_ENUM, TYPE_ARG, STMTS)      \
+  DTYPE_CASES_BEGIN(TYPE_ENUM)                       \
+  DTYPE_NUMERICAL_CASES(TYPE_ARG, SINGLE_ARG(STMTS)) \
+  DTYPE_STRING_CASES(TYPE_ARG, SINGLE_ARG(STMTS))    \
+  DTYPE_CASES_END(TYPE_ENUM)
+
+#define NUMERICAL_ONLY_DTYPE_CASES(TYPE_ENUM, TYPE_ARG, STMTS) \
+  DTYPE_CASES_BEGIN(TYPE_ENUM)                                 \
+  DTYPE_NUMERICAL_CASES(TYPE_ARG, SINGLE_ARG(STMTS))           \
+  DTYPE_CASES_END(TYPE_ENUM)
+
+#define FLOATING_ONLY_DTYPE_CASES(TYPE_ENUM, TYPE_ARG, STMTS) \
+  DTYPE_CASES_BEGIN(TYPE_ENUM)                                \
+  DTYPE_FLOATING_CASES(TYPE_ARG, SINGLE_ARG(STMTS))           \
+  DTYPE_CASES_END(TYPE_ENUM)
 
 }  // namespace internal
 

@@ -44,6 +44,7 @@
 #include "fcp/client/opstats/opstats_logger.h"
 #include "fcp/client/opstats/opstats_utils.h"
 #include "fcp/client/parsing_utils.h"
+#include "fcp/client/phase_logger.h"
 
 #ifdef FCP_CLIENT_SUPPORT_TFMOBILE
 #include "fcp/client/engine/simple_plan_engine.h"
@@ -150,7 +151,8 @@ struct PlanResultAndCheckpointFile {
 // `tensorflow_spec != nullptr`.
 absl::StatusOr<ComputationResults> CreateComputationResults(
     const TensorflowSpec* tensorflow_spec,
-    const PlanResultAndCheckpointFile& plan_result_and_checkpoint_file) {
+    const PlanResultAndCheckpointFile& plan_result_and_checkpoint_file,
+    const Flags* flags) {
   const auto& [plan_result, checkpoint_file] = plan_result_and_checkpoint_file;
   if (plan_result.outcome != engine::PlanOutcome::kSuccess) {
     return absl::InvalidArgumentError("Computation failed.");
@@ -208,13 +210,22 @@ absl::StatusOr<ComputationResults> CreateComputationResults(
     }
   }
 
-  // Name of the TF checkpoint inside the aggregand map in the Checkpoint
-  // protobuf. This field name is ignored by the server.
-  if (!checkpoint_file.empty()) {
-    FCP_ASSIGN_OR_RETURN(std::string tf_checkpoint,
-                         fcp::ReadFileToString(checkpoint_file));
-    computation_results[std::string(kTensorflowCheckpointAggregand)] =
-        std::move(tf_checkpoint);
+  if (flags->enable_lightweight_client_report_wire_format()) {
+    // Reads string from federated_compute_checkpoint
+    if (plan_result.federated_compute_checkpoint.empty()) {
+      return absl::InvalidArgumentError("Empty federate compute checkpoint");
+    }
+    computation_results[kFederatedComputeCheckpoint] =
+        std::move(plan_result.federated_compute_checkpoint);
+  } else {
+    // Name of the TF checkpoint inside the aggregand map in the Checkpoint
+    // protobuf. This field name is ignored by the server.
+    if (!checkpoint_file.empty()) {
+      FCP_ASSIGN_OR_RETURN(std::string tf_checkpoint,
+                           fcp::ReadFileToString(checkpoint_file));
+      computation_results[std::string(kTensorflowCheckpointAggregand)] =
+          std::move(tf_checkpoint);
+    }
   }
   return computation_results;
 }
@@ -295,7 +306,9 @@ void UpdateRetryWindowAndNetworkStats(FederatedProtocol& federated_protocol,
 // SimpleTaskEnvironment::CreateExampleIterator() method.
 std::unique_ptr<engine::ExampleIteratorFactory>
 CreateSimpleTaskEnvironmentIteratorFactory(
-    SimpleTaskEnvironment* task_env, const SelectorContext& selector_context) {
+    SimpleTaskEnvironment* task_env, const SelectorContext& selector_context,
+    PhaseLogger* phase_logger, const Flags* flags,
+    bool should_log_collection_first_access_time) {
   return std::make_unique<engine::FunctionalExampleIteratorFactory>(
       /*can_handle_func=*/
       [](const google::internal::federated::plan::ExampleSelector&) {
@@ -305,9 +318,15 @@ CreateSimpleTaskEnvironmentIteratorFactory(
         return true;
       },
       /*create_iterator_func=*/
-      [task_env, selector_context](
-          const google::internal::federated::plan::ExampleSelector&
-              example_selector) {
+      [task_env, selector_context, should_log_collection_first_access_time,
+       phase_logger,
+       flags](const google::internal::federated::plan::ExampleSelector&
+                  example_selector) {
+        if (should_log_collection_first_access_time &&
+            flags->log_collection_first_access_time()) {
+          phase_logger->LogCollectionFirstAccessTime(
+              example_selector.collection_uri());
+        }
         return task_env->CreateExampleIterator(example_selector,
                                                selector_context);
       },
@@ -336,12 +355,13 @@ engine::PlanResult RunEligibilityEvalPlanWithTensorflowSpec(
   std::vector<std::string> output_names = {
       io_router.task_eligibility_info_tensor_name()};
 
-  if (!client_plan.tflite_graph().empty()) {
+  const bool tflite_model_included = !client_plan.tflite_graph().empty();
+  if (tflite_model_included) {
     log_manager->LogDiag(
         ProdDiagCode::BACKGROUND_TRAINING_TFLITE_MODEL_INCLUDED);
   }
 
-  if (flags->use_tflite_training() && !client_plan.tflite_graph().empty()) {
+  if (flags->use_tflite_training() && tflite_model_included) {
     std::unique_ptr<TfLiteInputs> tflite_inputs =
         ConstructTfLiteInputsForEligibilityEvalPlan(io_router,
                                                     checkpoint_input_filename);
@@ -498,8 +518,13 @@ PlanResultAndCheckpointFile RunPlanWithTensorflowSpec(
         engine::PlanOutcome::kInvalidArgument, output_names.status()));
   }
 
+  const bool tflite_model_included = !client_plan.tflite_graph().empty();
+  if (tflite_model_included) {
+    log_manager->LogDiag(
+        ProdDiagCode::BACKGROUND_TRAINING_TFLITE_MODEL_INCLUDED);
+  }
   // Run plan and get a set of output tensors back.
-  if (flags->use_tflite_training() && !client_plan.tflite_graph().empty()) {
+  if (flags->use_tflite_training() && tflite_model_included) {
     std::unique_ptr<TfLiteInputs> tflite_inputs =
         ConstructTFLiteInputsForTensorflowSpecPlan(
             client_plan.phase().federated_compute(), checkpoint_input_filename,
@@ -1207,14 +1232,6 @@ absl::StatusOr<CheckinResult> CreateCheckinResultFromTaskAssignment(
 
   int32_t minimum_clients_in_server_visible_aggregate = 0;
   if (task_assignment.sec_agg_info.has_value()) {
-    auto minimum_number_of_participants =
-        plan.phase().minimum_number_of_participants();
-    if (task_assignment.sec_agg_info->expected_number_of_clients <
-        minimum_number_of_participants) {
-      return absl::InternalError(
-          "expectedNumberOfClients was less than Plan's "
-          "minimumNumberOfParticipants.");
-    }
     minimum_clients_in_server_visible_aggregate =
         task_assignment.sec_agg_info
             ->minimum_clients_in_server_visible_aggregate;
@@ -1704,9 +1721,13 @@ RunPlanResults RunComputation(
 
   // Regular plans can use example iterators from the SimpleTaskEnvironment,
   // those reading the OpStats DB, or those serving Federated Select slices.
+  // This iterator factory is used by the task to query the environment's
+  // example store. We log first access time here to implement example-level
+  // sampling without replacement for the environment.
   std::unique_ptr<engine::ExampleIteratorFactory> env_example_iterator_factory =
       CreateSimpleTaskEnvironmentIteratorFactory(
-          env_deps, federated_selector_context_with_task_name);
+          env_deps, federated_selector_context_with_task_name, &phase_logger,
+          flags, /*should_log_collection_first_access_time=*/true);
   std::unique_ptr<::fcp::client::engine::ExampleIteratorFactory>
       fedselect_example_iterator_factory =
           fedselect_manager->CreateExampleIteratorFactoryForUriTemplate(
@@ -1737,7 +1758,7 @@ RunPlanResults RunComputation(
         checkin_result->plan.phase().has_example_query_spec()
             ? nullptr
             : &checkin_result->plan.phase().tensorflow_spec(),
-        plan_result_and_checkpoint_file);
+        plan_result_and_checkpoint_file, flags);
   }
   LogComputationOutcome(
       plan_result_and_checkpoint_file.plan_result, computation_results.status(),
@@ -1970,10 +1991,14 @@ absl::StatusOr<FLRunnerResult> RunFederatedComputation(
   // SimpleTaskEnvironment and those reading the OpStats DB.
   opstats::OpStatsExampleIteratorFactory opstats_example_iterator_factory(
       opstats_logger, log_manager);
+  // This iterator factory is used by the task to query the environment's
+  // example store for eligibility, and thus does not log first access time
+  // since we do not implement example-level SWOR for eligibility.
   std::unique_ptr<engine::ExampleIteratorFactory>
       env_eligibility_example_iterator_factory =
           CreateSimpleTaskEnvironmentIteratorFactory(
-              env_deps, eligibility_selector_context);
+              env_deps, eligibility_selector_context, &phase_logger, flags,
+              /*should_log_collection_first_access_time=*/false);
   std::vector<engine::ExampleIteratorFactory*>
       eligibility_example_iterator_factories{
           &opstats_example_iterator_factory,
@@ -2093,7 +2118,8 @@ FLRunnerTensorflowSpecResult RunPlanWithTensorflowSpecForTesting(
   opstats::OpStatsExampleIteratorFactory opstats_example_iterator_factory(
       opstats_logger.get(), log_manager);
   std::unique_ptr<engine::ExampleIteratorFactory> env_example_iterator_factory =
-      CreateSimpleTaskEnvironmentIteratorFactory(env_deps, SelectorContext());
+      CreateSimpleTaskEnvironmentIteratorFactory(env_deps, SelectorContext(),
+                                                 &phase_logger, flags, true);
   std::vector<engine::ExampleIteratorFactory*> example_iterator_factories{
       &opstats_example_iterator_factory, env_example_iterator_factory.get()};
 

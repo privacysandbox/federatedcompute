@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("//fcp:config.bzl", "FCP_COPTS")
 load("@org_tensorflow//tensorflow/core/platform:build_config.bzl", "tf_proto_library")
 load("@com_github_grpc_grpc//bazel:python_rules.bzl", "py_proto_library")
-load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 
 package(
     default_visibility = [
@@ -147,6 +147,7 @@ cc_library(
         "@com_google_absl//absl/container:node_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:cord",
     ],
 )
 

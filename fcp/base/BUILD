@@ -17,7 +17,9 @@ tracing_schema_cc_library(
 # Used to detect when we're building for Android, using select().
 config_setting(
     name = "android",
-    values = {"crosstool_top": "//external:android/crosstool"},
+    constraint_values = [
+        "@platforms//os:android",
+    ],
 )
 
 cc_library(
@@ -35,21 +37,13 @@ cc_library(
         "platform.h",
     ],
     copts = FCP_COPTS,
-    linkopts = select({
-        ":android": [
-            # For accessing Android's native logging APIs.
-            "-llog",
-        ],
-        "//conditions:default": [],
-    }),
     deps = [
         "@com_google_absl//absl/base:core_headers",
-        "@com_google_absl//absl/base:log_severity",
+        "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:cord",
-        "@com_google_absl//absl/strings:str_format",
     ],
 )
 

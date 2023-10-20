@@ -85,13 +85,6 @@ class MockEventPublisher : public EventPublisher {
                absl::Duration phase_duration),
               (override));
   MOCK_METHOD(void, PublishRejected, (), (override));
-  MOCK_METHOD(void, PublishReportStarted, (int64_t report_size_bytes),
-              (override));
-  MOCK_METHOD(void, PublishReportFinished,
-              (const NetworkStats& network_stats,
-               absl::Duration report_duration),
-              (override));
-  MOCK_METHOD(void, PublishPlanExecutionStarted, (), (override));
   MOCK_METHOD(void, PublishTensorFlowError,
               (int example_count, absl::string_view error_message), (override));
   MOCK_METHOD(void, PublishIoError, (absl::string_view error_message),
@@ -99,9 +92,6 @@ class MockEventPublisher : public EventPublisher {
   MOCK_METHOD(void, PublishExampleSelectorError,
               (int example_count, absl::string_view error_message), (override));
   MOCK_METHOD(void, PublishInterruption,
-              (const ExampleStats& example_stats, absl::Time start_time),
-              (override));
-  MOCK_METHOD(void, PublishPlanCompleted,
               (const ExampleStats& example_stats, absl::Time start_time),
               (override));
   MOCK_METHOD(void, SetModelIdentifier, (const std::string& model_identifier),
@@ -546,6 +536,9 @@ class MockOpStatsLogger : public ::fcp::client::opstats::OpStatsLogger {
               (::fcp::client::opstats::OperationalStats::Event::EventKind event,
                const std::string& error_message),
               (override));
+  MOCK_METHOD(void, RecordCollectionFirstAccessTime,
+              (absl::string_view collection_uri, absl::Time first_access_time),
+              (override));
   MOCK_METHOD(void, UpdateDatasetStats,
               (const std::string& collection_uri, int additional_example_count,
                int64_t additional_example_size_bytes),
@@ -830,6 +823,8 @@ class MockPhaseLogger : public PhaseLogger {
               (absl::string_view task_name, const NetworkStats& network_stats,
                absl::Time time_before_checkin,
                absl::Time time_before_plan_download, absl::Time reference_time),
+              (override));
+  MOCK_METHOD(void, LogCollectionFirstAccessTime, (absl::string_view),
               (override));
   MOCK_METHOD(void, LogComputationStarted, (absl::string_view), (override));
   MOCK_METHOD(void, LogComputationInvalidArgument,

@@ -21,7 +21,6 @@
 #include <cstdint>
 
 #include "absl/status/status.h"
-#include "absl/strings/cord.h"
 #include "fcp/aggregation/protocol/aggregation_protocol_messages.pb.h"
 #include "fcp/aggregation/protocol/configuration.pb.h"
 #include "pybind11_abseil/absl_casters.h"
@@ -32,40 +31,16 @@ namespace {
 
 namespace py = ::pybind11;
 
-using ::fcp::aggregation::AcceptanceMessage;
 using ::fcp::aggregation::AggregationProtocol;
-using ::fcp::aggregation::ServerMessage;
 
 // Allow AggregationProtocol::Callback to be subclassed in Python. See
 // https://pybind11.readthedocs.io/en/stable/advanced/classes.html#overriding-virtual-functions-in-python
 class PyAggregationProtocolCallback : public AggregationProtocol::Callback {
  public:
-  void OnAcceptClients(int64_t start_client_id, int64_t num_clients,
-                       const AcceptanceMessage& message) override {
-    PYBIND11_OVERRIDE_PURE(void, AggregationProtocol::Callback, OnAcceptClients,
-                           start_client_id, num_clients, message);
-  }
-
-  void OnSendServerMessage(int64_t client_id,
-                           const ServerMessage& message) override {
-    PYBIND11_OVERRIDE_PURE(void, AggregationProtocol::Callback,
-                           OnSendServerMessage, client_id, message);
-  }
-
   void OnCloseClient(int64_t client_id,
                      absl::Status diagnostic_status) override {
     PYBIND11_OVERRIDE_PURE(void, AggregationProtocol::Callback, OnCloseClient,
                            client_id,
-                           py::google::DoNotThrowStatus(diagnostic_status));
-  }
-
-  void OnComplete(absl::Cord result) override {
-    PYBIND11_OVERRIDE_PURE(void, AggregationProtocol::Callback, OnComplete,
-                           result);
-  }
-
-  void OnAbort(absl::Status diagnostic_status) override {
-    PYBIND11_OVERRIDE_PURE(void, AggregationProtocol::Callback, OnAbort,
                            py::google::DoNotThrowStatus(diagnostic_status));
   }
 };
@@ -85,16 +60,12 @@ PYBIND11_MODULE(aggregation_protocol, m) {
           .def("CloseClient", &AggregationProtocol::CloseClient)
           .def("Complete", &AggregationProtocol::Complete)
           .def("Abort", &AggregationProtocol::Abort)
-          .def("GetStatus", &AggregationProtocol::GetStatus);
+          .def("GetStatus", &AggregationProtocol::GetStatus)
+          .def("GetResult", &AggregationProtocol::GetResult);
 
   pybind11::class_<AggregationProtocol::Callback,
                    PyAggregationProtocolCallback>(py_aggregation_protocol,
                                                   "Callback")
       .def(py::init<>())
-      .def("OnAcceptClients", &AggregationProtocol::Callback::OnAcceptClients)
-      .def("OnSendServerMessage",
-           &AggregationProtocol::Callback::OnSendServerMessage)
-      .def("OnCloseClient", &AggregationProtocol::Callback::OnCloseClient)
-      .def("OnComplete", &AggregationProtocol::Callback::OnComplete)
-      .def("OnAbort", &AggregationProtocol::Callback::OnAbort);
+      .def("OnCloseClient", &AggregationProtocol::Callback::OnCloseClient);
 }

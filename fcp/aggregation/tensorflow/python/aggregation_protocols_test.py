@@ -51,21 +51,8 @@ class CallbackProxy(aggregation_protocol.AggregationProtocol.Callback):
     super().__init__()
     self._callback = callback
 
-  def OnAcceptClients(self, start_client_id: int, num_clients: int,
-                      message: apm_pb2.AcceptanceMessage):
-    self._callback.OnAcceptClients(start_client_id, num_clients, message)
-
-  def OnSendServerMessage(self, client_id: int, message: apm_pb2.ServerMessage):
-    self._callback.OnSendServerMessage(client_id, message)
-
   def OnCloseClient(self, client_id: int, diagnostic_status: status.Status):
     self._callback.OnCloseClient(client_id, diagnostic_status)
-
-  def OnComplete(self, result: bytes):
-    self._callback.OnComplete(result)
-
-  def OnAbort(self, diagnostic_status: status.Status):
-    self._callback.OnAbort(diagnostic_status)
 
 
 class AggregationProtocolsTest(absltest.TestCase):
@@ -91,8 +78,7 @@ class AggregationProtocolsTest(absltest.TestCase):
     self.assertIsNotNone(agg_protocol)
 
     agg_protocol.Start(2)
-    callback.OnAcceptClients.assert_called_once_with(mock.ANY, 2, mock.ANY)
-    start_client_id = callback.OnAcceptClients.call_args.args[0]
+    start_client_id = 0
 
     agg_protocol.ReceiveClientMessage(
         start_client_id, create_client_input({input_tensor.name: 3}))
@@ -104,9 +90,8 @@ class AggregationProtocolsTest(absltest.TestCase):
     ])
 
     agg_protocol.Complete()
-    callback.OnComplete.assert_called_once()
     with tempfile.NamedTemporaryFile('wb') as tmpfile:
-      tmpfile.write(callback.OnComplete.call_args.args[0])
+      tmpfile.write(agg_protocol.GetResult())
       tmpfile.flush()
       self.assertEqual(
           tf.raw_ops.Restore(

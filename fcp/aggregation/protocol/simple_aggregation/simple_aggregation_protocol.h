@@ -18,19 +18,23 @@
 #define FCP_AGGREGATION_PROTOCOL_SIMPLE_AGGREGATION_SIMPLE_AGGREGATION_PROTOCOL_H_
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/cord.h"
 #include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 #include "fcp/aggregation/core/intrinsic.h"
+#include "fcp/aggregation/core/tensor.h"
 #include "fcp/aggregation/core/tensor_aggregator.h"
 #include "fcp/aggregation/protocol/aggregation_protocol.h"
 #include "fcp/aggregation/protocol/aggregation_protocol_messages.pb.h"
@@ -98,7 +102,7 @@ class SimpleAggregationProtocol final : public AggregationProtocol {
 
   // Implementation of the overridden Aggregation Protocol methods.
   absl::Status Start(int64_t num_clients) override;
-  absl::Status AddClients(int64_t num_clients) override;
+  absl::StatusOr<int64_t> AddClients(int64_t num_clients) override;
   absl::Status ReceiveClientMessage(int64_t client_id,
                                     const ClientMessage& message) override;
   absl::StatusOr<std::optional<ServerMessage>> PollServerMessage(
@@ -208,12 +212,14 @@ class SimpleAggregationProtocol final : public AggregationProtocol {
   absl::StatusOr<absl::Cord> CreateReport()
       ABSL_LOCKS_EXCLUDED(aggregation_mu_);
 
-  // Schedules PerformOutlierDetection to be called later if needed.
-  void ScheduleOutlierDetection() ABSL_LOCKS_EXCLUDED(state_mu_);
+  void ScheduleOutlierDetection()
+      ABSL_LOCKS_EXCLUDED(state_mu_, outlier_detection_mu_);
   // Called periodically from a background thread to perform outlier detection.
-  void PerformOutlierDetection() ABSL_LOCKS_EXCLUDED(state_mu_);
+  void PerformOutlierDetection()
+      ABSL_LOCKS_EXCLUDED(state_mu_, outlier_detection_mu_);
   // Stops outlier detection.
-  void StopOutlierDetection() ABSL_EXCLUSIVE_LOCKS_REQUIRED(state_mu_);
+  void StopOutlierDetection()
+      ABSL_LOCKS_EXCLUDED(state_mu_, outlier_detection_mu_);
 
   // Protects the mutable state.
   absl::Mutex state_mu_;
@@ -243,10 +249,6 @@ class SimpleAggregationProtocol final : public AggregationProtocol {
   // determining the outliers.
   LatencyAggregator latency_aggregator_ ABSL_GUARDED_BY(state_mu_);
 
-  // Used to cancel pending outlier detection.
-  CancelationToken outlier_detection_cancelation_token_
-      ABSL_GUARDED_BY(state_mu_);
-
   // Counters for various client states other than pending.
   // Note that the number of pending clients can be found by subtracting the
   // sum of the below counters from `client_states_.size()`.
@@ -268,8 +270,15 @@ class SimpleAggregationProtocol final : public AggregationProtocol {
   const CheckpointBuilderFactory* const checkpoint_builder_factory_;
   ResourceResolver* const resource_resolver_;
   Clock* const clock_;
+  // The result of the aggregation.
+  absl::Cord result_ ABSL_GUARDED_BY(state_mu_);
 
-  std::optional<OutlierDetectionParameters> const outlier_detection_parameters_;
+  // Fields related to outlier detection.
+  absl::Mutex outlier_detection_mu_;
+  CancelationToken outlier_detection_cancelation_token_
+      ABSL_GUARDED_BY(outlier_detection_mu_);
+  std::optional<OutlierDetectionParameters> outlier_detection_parameters_
+      ABSL_GUARDED_BY(outlier_detection_mu_);
 };
 }  // namespace fcp::aggregation
 

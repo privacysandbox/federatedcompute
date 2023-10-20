@@ -190,46 +190,6 @@ class AggregationsTest(absltest.TestCase, unittest.IsolatedAsyncioTestCase):
     mock_agg_protocol.Complete.assert_called_once()
     mock_agg_protocol.Abort.assert_not_called()
 
-  @mock.patch.object(
-      aggregation_protocols,
-      'create_simple_aggregation_protocol',
-      autospec=True)
-  def test_complete_session_aborts(self, mock_create_simple_agg_protocol):
-    # Use a mock since it's not easy to cause
-    # SimpleAggregationProtocol::Complete to trigger a protocol abort.
-    mock_agg_protocol = mock.create_autospec(
-        aggregation_protocol.AggregationProtocol, instance=True)
-    mock_create_simple_agg_protocol.return_value = mock_agg_protocol
-
-    service = aggregations.Service(lambda: FORWARDING_INFO,
-                                   self.mock_media_service)
-    session_id = service.create_session(AGGREGATION_REQUIREMENTS)
-
-    required_clients = (
-        AGGREGATION_REQUIREMENTS.minimum_clients_in_server_published_aggregate)
-    agg_status = apm_pb2.StatusMessage(
-        num_inputs_aggregated_and_included=required_clients)
-    mock_agg_protocol.GetStatus.side_effect = lambda: agg_status
-
-    def on_complete():
-      agg_status.num_inputs_discarded = (
-          agg_status.num_inputs_aggregated_and_included)
-      agg_status.num_inputs_aggregated_and_included = 0
-      callback = mock_create_simple_agg_protocol.call_args.args[1]
-      callback.OnAbort(absl_status.unknown_error('message'))
-
-    mock_agg_protocol.Complete.side_effect = on_complete
-
-    status, aggregate = service.complete_session(session_id)
-    self.assertEqual(
-        status,
-        aggregations.SessionStatus(
-            status=aggregations.AggregationStatus.FAILED,
-            num_inputs_discarded=required_clients))
-    self.assertIsNone(aggregate)
-    mock_agg_protocol.Complete.assert_called_once()
-    mock_agg_protocol.Abort.assert_not_called()
-
   def test_complete_session_without_enough_inputs(self):
     service = aggregations.Service(lambda: FORWARDING_INFO,
                                    self.mock_media_service)
@@ -416,39 +376,6 @@ class AggregationsTest(absltest.TestCase, unittest.IsolatedAsyncioTestCase):
     await asyncio.wait([task], timeout=1)
     self.assertTrue(task.done())
     self.assertEqual(task.result(), status)
-
-  @mock.patch.object(
-      aggregation_protocols,
-      'create_simple_aggregation_protocol',
-      autospec=True)
-  async def test_wait_with_protocol_abort(self,
-                                          mock_create_simple_agg_protocol):
-    # Use a mock since it's not easy to cause the AggregationProtocol to abort.
-    mock_agg_protocol = mock.create_autospec(
-        aggregation_protocol.AggregationProtocol, instance=True)
-    mock_create_simple_agg_protocol.return_value = mock_agg_protocol
-    mock_agg_protocol.GetStatus.return_value = apm_pb2.StatusMessage(
-        num_clients_aborted=1234)
-
-    service = aggregations.Service(lambda: FORWARDING_INFO,
-                                   self.mock_media_service)
-    session_id = service.create_session(AGGREGATION_REQUIREMENTS)
-    task = asyncio.create_task(
-        service.wait(session_id, num_inputs_aggregated_and_included=1))
-    # The awaitable should not be done yet.
-    await asyncio.wait([task], timeout=0.1)
-    self.assertFalse(task.done())
-
-    # The awaitable should return once the AggregationProtocol aborts.
-    callback = mock_create_simple_agg_protocol.call_args.args[1]
-    callback.OnAbort(absl_status.unknown_error('message'))
-    await asyncio.wait([task], timeout=1)
-    self.assertTrue(task.done())
-    self.assertEqual(
-        task.result(),
-        aggregations.SessionStatus(
-            status=aggregations.AggregationStatus.FAILED,
-            num_clients_aborted=1234))
 
   async def test_wait_with_complete(self):
     service = aggregations.Service(lambda: FORWARDING_INFO,

@@ -17,6 +17,8 @@
 #ifndef FCP_CLIENT_FAKE_EVENT_PUBLISHER_H_
 #define FCP_CLIENT_FAKE_EVENT_PUBLISHER_H_
 
+#include <cxxabi.h>  // IWYU pragma: keep
+
 #include "absl/strings/str_split.h"
 #include "absl/time/time.h"
 #include "fcp/base/monitoring.h"
@@ -116,22 +118,6 @@ class FakeEventPublisher : public EventPublisher {
 
   void PublishRejected() override { FCP_CLIENT_LOG_FUNCTION_NAME; }
 
-  void PublishReportStarted(int64_t report_size_bytes) override {
-    if (quiet_) return;
-    FCP_CLIENT_LOG_FUNCTION_NAME;
-  }
-
-  void PublishReportFinished(const NetworkStats& network_stats,
-                             absl::Duration report_duration) override {
-    if (quiet_) return;
-    FCP_CLIENT_LOG_FUNCTION_NAME;
-  }
-
-  void PublishPlanExecutionStarted() override {
-    if (quiet_) return;
-    FCP_CLIENT_LOG_FUNCTION_NAME;
-  }
-
   void PublishTensorFlowError(int example_count,
                               absl::string_view error_message) override {
     FCP_CLIENT_LOG_FUNCTION_NAME << error_message;
@@ -148,12 +134,6 @@ class FakeEventPublisher : public EventPublisher {
 
   void PublishInterruption(const ExampleStats& example_stats,
                            absl::Time start_time) override {
-    if (quiet_) return;
-    FCP_CLIENT_LOG_FUNCTION_NAME;
-  }
-
-  void PublishPlanCompleted(const ExampleStats& example_stats,
-                            absl::Time start_time) override {
     if (quiet_) return;
     FCP_CLIENT_LOG_FUNCTION_NAME;
   }
