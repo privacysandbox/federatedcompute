@@ -162,6 +162,10 @@ http_archive(
         # This patch enables googleapi Java and Python proto rules such as
         # @com_google_googleapis//google/rpc:rpc_java_proto.
         "//fcp/patches:tensorflow_googleapis_proto_rules.patch",
+        # This patch works around failures in GitHub infrastructure to
+        # download versions of LLVM pointed to by non-HEAD TensorFlow.
+        # TODO(team): Remove this patch when resolved.
+        "//fcp/patches:tensorflow_llvm_url.patch",
         # TensorFlow's custom pybind11 BUILD file is missing the osx config
         # setting expected by pybind11_bazel.
         "//fcp/patches:tensorflow_pybind11_osx.patch",
@@ -172,6 +176,8 @@ http_archive(
         # gRPC v1.48.0-pre1 and later include zconf.h in addition to zlib.h;
         # TensorFlow's build rule for zlib only exports the latter.
         "//fcp/patches:tensorflow_zlib.patch",
+        # Fix clang 16 build. Remove after upgrade to 2.14.
+        "//fcp/patches:tensorflow_clang16.patch",
     ],
     sha256 = "e58c939079588623e6fa1d054aec2f90f95018266e0a970fd353a5244f5173dc",
     strip_prefix = "tensorflow-2.13.0",
