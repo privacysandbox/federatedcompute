@@ -120,8 +120,8 @@ message RejectionInfo {
     // Retry after a period of time.
     RetryWindow retry_window = 1002;
 
-    // Auth required
-    AuthChallenge auth_challenge = 1003;
+    // The field is used when the RejectionReason is UNAUTHENTICATED.
+    AuthenticationMetadata auth_metadata = 1003;
   }
 }
 
@@ -141,7 +141,20 @@ message RetryWindow {
   google.protobuf.Duration delay_max = 2;
 }
 
-// Next id: 3
+// The metadata used to authenticate a device.
+// Next Id: 2
+message AuthenticationMetadata {
+  KeyAttestationAuthMetadata key_attestation_metadata = 1;
+}
+
+// The metadata to authenticate with key attestation.
+// Next Id: 2
+message KeyAttestationAuthMetadata {
+  // The challenge to generate hardware-backed key pairs on device.
+  bytes challenge = 1;
+}
+
+// Next id: 4
 message RejectionReason {
   enum Enum {
     // Unknown status.
@@ -152,13 +165,10 @@ message RejectionReason {
 
     // No permission to do the operation.
     UNAUTHORIZED = 2;
-  }
-}
 
-// Next id: 2
-message AuthChallenge {
-  // challenge nonce.
-  string nonce = 1;
+    // The device is not authenticated to the server.
+    UNAUTHENTICATED = 3;
+  }
 }
 
 // Information about where to upload data (e.g. aggregation results, client
