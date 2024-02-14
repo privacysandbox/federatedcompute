@@ -17,10 +17,12 @@
 #ifndef FCP_CLIENT_OPSTATS_OPSTATS_UTILS_H_
 #define FCP_CLIENT_OPSTATS_OPSTATS_UTILS_H_
 
+#include <cstdint>
 #include <optional>
 #include <string>
 
 #include "google/protobuf/timestamp.pb.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/strings/string_view.h"
 #include "fcp/base/monitoring.h"
 #include "fcp/client/opstats/opstats_db.h"
@@ -29,6 +31,13 @@
 namespace fcp {
 namespace client {
 namespace opstats {
+
+// Returns an optional containing a map of collection URIs to the timestamp of
+// the first time the collection was accessed when the runtime last
+// successfully contributed to a task.
+std::optional<absl::flat_hash_map<std::string, google::protobuf::Timestamp>>
+GetPreviousCollectionFirstAccessTimeMap(const OpStatsSequence& data,
+                                        absl::string_view task_name);
 
 // Returns an optional containing an OperationalStats of the last time the
 // runtime successfully contributed to a task with the given task name,
@@ -49,6 +58,12 @@ std::optional<google::protobuf::Timestamp> GetLastSuccessfulContributionTime(
 std::optional<google::protobuf::Timestamp>
 GetLastSuccessfulContributionTimeForPattern(const OpStatsSequence& data,
                                             const RE2& compiled_pattern);
+
+// Returns an optional containing the MinimumSeparationPolicy index of the last
+// time the runtime successfully contributed to a task with the given task name,
+// otherwise returns an empty optional.
+std::optional<int64_t> GetLastSuccessfulContributionMinSepPolicyIndex(
+    const OpStatsSequence& data, absl::string_view task_name);
 
 // Returns a list of OperationalStats for the tasks that ran in the given time
 // range in reverse time order.

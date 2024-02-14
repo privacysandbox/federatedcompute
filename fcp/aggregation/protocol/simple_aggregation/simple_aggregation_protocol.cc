@@ -32,18 +32,10 @@
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
-#include "fcp/aggregation/core/input_tensor_list.h"
-#include "fcp/aggregation/core/intrinsic.h"
-#include "fcp/aggregation/core/tensor.h"
-#include "fcp/aggregation/core/tensor_aggregator.h"
-#include "fcp/aggregation/core/tensor_aggregator_factory.h"
-#include "fcp/aggregation/core/tensor_aggregator_registry.h"
-#include "fcp/aggregation/core/tensor_spec.h"
-#include "fcp/aggregation/protocol/aggregation_protocol.h"
 #include "fcp/aggregation/protocol/aggregation_protocol_messages.pb.h"
+#include "fcp/aggregation/protocol/checkpoint_aggregator.h"
 #include "fcp/aggregation/protocol/checkpoint_builder.h"
 #include "fcp/aggregation/protocol/checkpoint_parser.h"
-#include "fcp/aggregation/protocol/config_converter.h"
 #include "fcp/aggregation/protocol/resource_resolver.h"
 #include "fcp/aggregation/protocol/simple_aggregation/cancelable_callback.h"
 #include "fcp/base/clock.h"
@@ -51,72 +43,63 @@
 
 namespace fcp::aggregation {
 
-// Creates an aggregation intrinsic based on the intrinsic configuration.
-absl::StatusOr<std::unique_ptr<TensorAggregator>>
-SimpleAggregationProtocol::CreateAggregator(const Intrinsic& intrinsic) {
-  // Resolve the intrinsic_uri to the registered TensorAggregatorFactory.
-  FCP_ASSIGN_OR_RETURN(const TensorAggregatorFactory* factory,
-                       GetAggregatorFactory(intrinsic.uri));
+namespace {
 
-  // Use the factory to create the TensorAggregator instance.
-  return factory->Create(intrinsic);
+// Timeout for waiting for the aggregation queue to empty when the aggregation
+// is completed or aborted. Please note that there is no actual queue but
+// there may potentially be multiple concurrent calls to accumulate client
+// inputs that all block inside ReceiveClientMessage, which is indicated by
+// clients being in CLIENT_RECEIVED_INPUT_AND_PENDING state and the
+// num_clients_received_and_pending_ count being greater than zero.
+// This timeout specifies how long Complete() or Abort() method will wait for
+// those blocked calls to go through and the num_clients_received_and_pending_
+// count to drop back to zero.
+constexpr absl::Duration kAggregationQueueWaitTimeout = absl::Seconds(5);
+
+ServerMessage MakeCloseClientMessage(absl::Status status) {
+  ServerMessage message;
+  message.mutable_simple_aggregation()->mutable_close_message()->set_code(
+      static_cast<int>(status.code()));
+  message.mutable_simple_aggregation()->mutable_close_message()->set_message(
+      std::string(std::move(status).message()));
+  return message;
 }
+}  // namespace
 
 absl::Status SimpleAggregationProtocol::ValidateConfig(
     const Configuration& configuration) {
-  for (const Configuration::ServerAggregationConfig& aggregation_config :
-       configuration.aggregation_configs()) {
-    if (!GetAggregatorFactory(aggregation_config.intrinsic_uri()).ok()) {
-      return ServerAggregationConfigArgumentError(
-          aggregation_config,
-          absl::StrFormat("%s is not a supported intrinsic_uri.",
-                          aggregation_config.intrinsic_uri()));
-    }
-  }
-  return absl::OkStatus();
+  return CheckpointAggregator::ValidateConfig(configuration);
 }
 
 absl::StatusOr<std::unique_ptr<SimpleAggregationProtocol>>
 SimpleAggregationProtocol::Create(
-    const Configuration& configuration, AggregationProtocol::Callback* callback,
+    const Configuration& configuration,
     const CheckpointParserFactory* checkpoint_parser_factory,
     const CheckpointBuilderFactory* checkpoint_builder_factory,
     ResourceResolver* resource_resolver, Clock* clock,
     std::optional<OutlierDetectionParameters> outlier_detection_parameters) {
-  FCP_CHECK(callback != nullptr);
   FCP_CHECK(checkpoint_parser_factory != nullptr);
   FCP_CHECK(checkpoint_builder_factory != nullptr);
   FCP_CHECK(resource_resolver != nullptr);
   FCP_CHECK(clock != nullptr);
-  FCP_RETURN_IF_ERROR(ValidateConfig(configuration));
 
-  FCP_ASSIGN_OR_RETURN(std::vector<Intrinsic> intrinsics,
-                       ParseFromConfig(configuration));
-  std::vector<std::unique_ptr<TensorAggregator>> aggregators;
-  for (const Intrinsic& intrinsic : intrinsics) {
-    FCP_ASSIGN_OR_RETURN(std::unique_ptr<TensorAggregator> aggregator,
-                         CreateAggregator(intrinsic));
-    aggregators.emplace_back(std::move(aggregator));
-  }
+  FCP_ASSIGN_OR_RETURN(auto checkpoint_aggregator,
+                       CheckpointAggregator::Create(configuration));
 
   return absl::WrapUnique(new SimpleAggregationProtocol(
-      std::move(intrinsics), std::move(aggregators), callback,
-      checkpoint_parser_factory, checkpoint_builder_factory, resource_resolver,
-      clock, std::move(outlier_detection_parameters)));
+      std::move(checkpoint_aggregator), checkpoint_parser_factory,
+      checkpoint_builder_factory, resource_resolver, clock,
+      std::move(outlier_detection_parameters)));
 }
 
 SimpleAggregationProtocol::SimpleAggregationProtocol(
-    std::vector<Intrinsic> intrinsics,
-    std::vector<std::unique_ptr<TensorAggregator>> aggregators,
-    AggregationProtocol::Callback* callback,
+    std::unique_ptr<CheckpointAggregator> checkpoint_aggregator,
     const CheckpointParserFactory* checkpoint_parser_factory,
     const CheckpointBuilderFactory* checkpoint_builder_factory,
     ResourceResolver* resource_resolver, Clock* clock,
     std::optional<OutlierDetectionParameters> outlier_detection_parameters)
     : protocol_state_(PROTOCOL_CREATED),
-      intrinsics_(std::move(intrinsics)),
-      aggregators_(std::move(aggregators)),
-      callback_(callback),
+      checkpoint_aggregator_(std::move(checkpoint_aggregator)),
       checkpoint_parser_factory_(checkpoint_parser_factory),
       checkpoint_builder_factory_(checkpoint_builder_factory),
       resource_resolver_(resource_resolver),
@@ -126,20 +109,6 @@ SimpleAggregationProtocol::SimpleAggregationProtocol(
 SimpleAggregationProtocol::~SimpleAggregationProtocol() {
   // Stop outlier detection in case it wasn't stopped before.
   StopOutlierDetection();
-}
-
-absl::string_view SimpleAggregationProtocol::ProtocolStateDebugString(
-    ProtocolState state) {
-  switch (state) {
-    case PROTOCOL_CREATED:
-      return "PROTOCOL_CREATED";
-    case PROTOCOL_STARTED:
-      return "PROTOCOL_STARTED";
-    case PROTOCOL_COMPLETED:
-      return "PROTOCOL_COMPLETED";
-    case PROTOCOL_ABORTED:
-      return "PROTOCOL_ABORTED";
-  }
 }
 
 absl::string_view SimpleAggregationProtocol::ClientStateDebugString(
@@ -163,10 +132,9 @@ absl::string_view SimpleAggregationProtocol::ClientStateDebugString(
 absl::Status SimpleAggregationProtocol::CheckProtocolState(
     ProtocolState state) const {
   if (protocol_state_ != state) {
-    return absl::FailedPreconditionError(
-        absl::StrFormat("The current protocol state is %s, expected %s.",
-                        ProtocolStateDebugString(protocol_state_),
-                        ProtocolStateDebugString(state)));
+    return absl::FailedPreconditionError(absl::StrFormat(
+        "The current protocol state is %s, expected %s.",
+        ProtocolState_Name(protocol_state_), ProtocolState_Name(state)));
   }
   return absl::OkStatus();
 }
@@ -177,24 +145,24 @@ void SimpleAggregationProtocol::SetProtocolState(ProtocolState state) {
       (protocol_state_ == PROTOCOL_STARTED &&
        (state == PROTOCOL_COMPLETED || state == PROTOCOL_ABORTED)))
       << "Invalid protocol state transition from "
-      << ProtocolStateDebugString(protocol_state_) << " to "
-      << ProtocolStateDebugString(state) << ".";
+      << ProtocolState_Name(protocol_state_) << " to "
+      << ProtocolState_Name(state) << ".";
   protocol_state_ = state;
 }
 
 absl::StatusOr<SimpleAggregationProtocol::ClientState>
 SimpleAggregationProtocol::GetClientState(int64_t client_id) const {
-  if (client_id < 0 || client_id >= client_states_.size()) {
+  if (client_id < 0 || client_id >= all_clients_.size()) {
     return absl::InvalidArgumentError(
         absl::StrFormat("client_id %ld is outside the valid range", client_id));
   }
-  return client_states_[client_id];
+  return all_clients_[client_id].state;
 }
 
 int64_t SimpleAggregationProtocol::AddPendingClients(size_t num_clients) {
-  int64_t start_index = client_states_.size();
+  int64_t start_index = all_clients_.size();
   int64_t end_index = start_index + num_clients;
-  client_states_.resize(end_index, CLIENT_PENDING);
+  all_clients_.resize(end_index, {CLIENT_PENDING, std::nullopt});
   absl::Time now = clock_->Now();
   for (int64_t client_id = start_index; client_id < end_index; ++client_id) {
     pending_clients_.emplace(client_id, now);
@@ -204,8 +172,8 @@ int64_t SimpleAggregationProtocol::AddPendingClients(size_t num_clients) {
 
 void SimpleAggregationProtocol::SetClientState(int64_t client_id,
                                                ClientState to_state) {
-  FCP_CHECK(client_id >= 0 && client_id < client_states_.size());
-  ClientState from_state = client_states_[client_id];
+  FCP_CHECK(client_id >= 0 && client_id < all_clients_.size());
+  ClientState from_state = all_clients_[client_id].state;
   FCP_CHECK(from_state != to_state);
   if (from_state == CLIENT_RECEIVED_INPUT_AND_PENDING) {
     num_clients_received_and_pending_--;
@@ -221,7 +189,7 @@ void SimpleAggregationProtocol::SetClientState(int64_t client_id,
     // Remove the client from the pending set.
     pending_clients_.erase(client_id);
   }
-  client_states_[client_id] = to_state;
+  all_clients_[client_id].state = to_state;
   switch (to_state) {
     case CLIENT_PENDING:
       FCP_LOG(FATAL) << "Client state can't be changed to CLIENT_PENDING";
@@ -244,153 +212,17 @@ void SimpleAggregationProtocol::SetClientState(int64_t client_id,
   }
 }
 
-namespace {
-
-size_t CountInputs(const Intrinsic& intrinsic) {
-  size_t count = intrinsic.inputs.size();
-  for (const Intrinsic& nested_intrinsic : intrinsic.nested_intrinsics) {
-    count += CountInputs(nested_intrinsic);
-  }
-  return count;
-}
-
-absl::Status AddInputsToMap(
-    const Intrinsic& intrinsic, CheckpointParser& parser,
-    absl::flat_hash_map<std::string, Tensor>& tensor_map) {
-  for (const TensorSpec& input_spec : intrinsic.inputs) {
-    auto existing_tensor_it = tensor_map.find(input_spec.name());
-    if (existing_tensor_it != tensor_map.end()) {
-      // Tensor with a matching name is already in the map.
-      const Tensor& existing_tensor = existing_tensor_it->second;
-      if (input_spec.dtype() == existing_tensor.dtype() &&
-          input_spec.shape().MatchesKnownDimensions(existing_tensor.shape())) {
-        continue;
-      } else {
-        return absl::InvalidArgumentError(
-            "Tensor with same name but unmatching spec already exists.");
-      }
-    }
-
-    FCP_ASSIGN_OR_RETURN(Tensor tensor, parser.GetTensor(input_spec.name()));
-    if (tensor.dtype() != input_spec.dtype() ||
-        !input_spec.shape().MatchesKnownDimensions(tensor.shape())) {
-      // TODO(team): Detailed diagnostics including the expected vs
-      // actual data types and shapes.
-      return absl::InvalidArgumentError("Input tensor spec mismatch.");
-    }
-    tensor_map.emplace(input_spec.name(), std::move(tensor));
-  }
-  for (const Intrinsic& nested_intrinsic : intrinsic.nested_intrinsics) {
-    FCP_RETURN_IF_ERROR(AddInputsToMap(nested_intrinsic, parser, tensor_map));
-  }
-  return absl::OkStatus();
-}
-
-absl::StatusOr<size_t> PopulateInputs(
-    const Intrinsic& intrinsic,
-    const absl::flat_hash_map<std::string, Tensor>& tensor_map, size_t index,
-    InputTensorList& inputs) {
-  size_t num_inputs = intrinsic.inputs.size();
-  for (const TensorSpec& input_spec : intrinsic.inputs) {
-    const auto& it = tensor_map.find(input_spec.name());
-    FCP_CHECK(it != tensor_map.end());
-    inputs[index++] = &it->second;
-  }
-  for (const Intrinsic& nested_intrinsic : intrinsic.nested_intrinsics) {
-    FCP_ASSIGN_OR_RETURN(
-        size_t nested_num_inputs,
-        PopulateInputs(nested_intrinsic, tensor_map, index, inputs));
-    index += nested_num_inputs;
-    num_inputs += nested_num_inputs;
-  }
-  return num_inputs;
-}
-
-absl::StatusOr<int> AddOutputsToCheckpoint(
-    const Intrinsic& intrinsic, const OutputTensorList& outputs,
-    int output_index, CheckpointBuilder& checkpoint_builder) {
-  int num_outputs = 0;
-  for (const TensorSpec& output_spec : intrinsic.outputs) {
-    if (output_spec.name().empty()) {
-      // TensorSpecs with empty names are not included in the output.
-      continue;
-    }
-    num_outputs++;
-    const Tensor& tensor = outputs[output_index++];
-    FCP_CHECK(tensor.dtype() == output_spec.dtype());
-    FCP_CHECK(output_spec.shape().MatchesKnownDimensions(tensor.shape()));
-    FCP_RETURN_IF_ERROR(checkpoint_builder.Add(output_spec.name(), tensor));
-  }
-  for (const Intrinsic& nested_intrinsic : intrinsic.nested_intrinsics) {
-    FCP_ASSIGN_OR_RETURN(
-        int nested_num_outputs,
-        AddOutputsToCheckpoint(nested_intrinsic, outputs, output_index,
-                               checkpoint_builder));
-    output_index += nested_num_outputs;
-    num_outputs += nested_num_outputs;
-  }
-  return num_outputs;
-}
-
-}  // namespace
-
-absl::StatusOr<SimpleAggregationProtocol::TensorMap>
-SimpleAggregationProtocol::ParseCheckpoint(absl::Cord report) const {
-  FCP_ASSIGN_OR_RETURN(std::unique_ptr<CheckpointParser> parser,
-                       checkpoint_parser_factory_->Create(report));
-  TensorMap tensor_map;
-  for (const auto& intrinsic : intrinsics_) {
-    FCP_RETURN_IF_ERROR(AddInputsToMap(intrinsic, *parser, tensor_map));
-  }
-
-  return tensor_map;
-}
-
-absl::Status SimpleAggregationProtocol::AggregateClientInput(
-    SimpleAggregationProtocol::TensorMap tensor_map) {
-  absl::MutexLock lock(&aggregation_mu_);
-  if (!aggregation_finished_) {
-    for (int i = 0; i < intrinsics_.size(); ++i) {
-      const Intrinsic& intrinsic = intrinsics_[i];
-      InputTensorList inputs(CountInputs(intrinsic));
-      FCP_RETURN_IF_ERROR(PopulateInputs(intrinsic, tensor_map, 0, inputs));
-      FCP_CHECK(aggregators_[i] != nullptr)
-          << "CreateReport() has already been called.";
-      FCP_RETURN_IF_ERROR(aggregators_[i]->Accumulate(std::move(inputs)));
-    }
-  }
-  return absl::OkStatus();
-}
-
 absl::StatusOr<absl::Cord> SimpleAggregationProtocol::CreateReport() {
-  absl::MutexLock lock(&aggregation_mu_);
-  for (const auto& aggregator : aggregators_) {
-    FCP_CHECK(aggregator != nullptr)
-        << "CreateReport() has already been called.";
-    if (!aggregator->CanReport()) {
-      return absl::FailedPreconditionError(
-          "The aggregation can't be completed due to failed preconditions.");
-    }
+  if (!checkpoint_aggregator_->CanReport()) {
+    return absl::FailedPreconditionError(
+        "The aggregation can't be completed due to failed preconditions.");
   }
 
-  // Build the resulting checkpoint.
   std::unique_ptr<CheckpointBuilder> checkpoint_builder =
       checkpoint_builder_factory_->Create();
-  for (int i = 0; i < intrinsics_.size(); ++i) {
-    auto tensor_aggregator = std::move(aggregators_[i]);
-    FCP_ASSIGN_OR_RETURN(OutputTensorList output_tensors,
-                         std::move(*tensor_aggregator).Report());
-    const Intrinsic& intrinsic = intrinsics_[i];
-    FCP_ASSIGN_OR_RETURN(int num_outputs,
-                         AddOutputsToCheckpoint(intrinsic, output_tensors, 0,
-                                                *checkpoint_builder));
-    FCP_CHECK(num_outputs == output_tensors.size())
-        << "Number of tensors produced by TensorAggregator "
-        << output_tensors.size()
-        << " does not match number of output tensors with nonempty names "
-        << num_outputs << ".";
-  }
-  aggregation_finished_ = true;
+
+  // Build the resulting checkpoint.
+  FCP_RETURN_IF_ERROR(checkpoint_aggregator_->Report(*checkpoint_builder));
   return checkpoint_builder->Build();
 }
 
@@ -402,7 +234,7 @@ absl::Status SimpleAggregationProtocol::Start(int64_t num_clients) {
     absl::MutexLock lock(&state_mu_);
     FCP_RETURN_IF_ERROR(CheckProtocolState(PROTOCOL_CREATED));
     SetProtocolState(PROTOCOL_STARTED);
-    FCP_CHECK(client_states_.empty());
+    FCP_CHECK(all_clients_.empty());
     AddPendingClients(num_clients);
   }
   ScheduleOutlierDetection();
@@ -476,56 +308,61 @@ absl::Status SimpleAggregationProtocol::ReceiveClientMessage(
       FCP_LOG(WARNING) << "Report with resource uri "
                        << message.simple_aggregation().input().uri()
                        << " for client " << client_id << "is missing. "
-                       << client_completion_status.ToString();
+                       << client_completion_status;
     } else {
       report = std::move(report_or_status.value());
     }
   }
 
   if (client_completion_state != CLIENT_FAILED) {
-    absl::StatusOr<TensorMap> tensor_map_or_status =
-        ParseCheckpoint(std::move(report));
-    if (!tensor_map_or_status.ok()) {
-      client_completion_status = tensor_map_or_status.status();
+    absl::StatusOr<std::unique_ptr<CheckpointParser>> parser_or_status =
+        checkpoint_parser_factory_->Create(report);
+    if (!parser_or_status.ok()) {
+      client_completion_status = parser_or_status.status();
       client_completion_state = CLIENT_FAILED;
       FCP_LOG(WARNING) << "Client " << client_id << " input can't be parsed: "
-                       << client_completion_status.ToString();
+                       << client_completion_status;
     } else {
-      // Aggregate the client input which would block on aggregation_mu_ if
-      // there are any concurrent AggregateClientInput calls.
       client_completion_status =
-          AggregateClientInput(std::move(tensor_map_or_status).value());
-      if (!client_completion_status.ok()) {
+          checkpoint_aggregator_->Accumulate(*parser_or_status.value());
+      if (client_completion_status.code() == StatusCode::kAborted) {
         client_completion_state = CLIENT_DISCARDED;
-        FCP_LOG(INFO) << "Client " << client_id << " input is discarded: "
-                      << client_completion_status.ToString();
+        FCP_LOG(INFO) << "Client " << client_id
+                      << " input is discarded: " << client_completion_status;
+      } else if (!client_completion_status.ok()) {
+        client_completion_state = CLIENT_FAILED;
+        FCP_LOG(INFO) << "Client " << client_id
+                      << " input can't be aggregated: "
+                      << client_completion_status;
       }
     }
   }
 
   // Update the state post aggregation.
-  std::optional<int64_t> client_id_to_close;
   {
     absl::MutexLock lock(&state_mu_);
-    // Change the client state only if the current state is still
-    // CLIENT_RECEIVED_INPUT_AND_PENDING, meaning that the client wasn't already
-    // closed by a concurrent Complete or Abort call.
-    if (client_states_[client_id] == CLIENT_RECEIVED_INPUT_AND_PENDING) {
-      latency_aggregator_.Add(client_latency);
-      SetClientState(client_id, client_completion_state);
-      client_id_to_close = client_id;
-    }
-  }
-  if (client_id_to_close.has_value()) {
-    callback_->OnCloseClient(client_id_to_close.value(),
-                             client_completion_status);
+    SetClientState(client_id, client_completion_state);
+    latency_aggregator_.Add(client_latency);
+    ServerMessage close_message =
+        MakeCloseClientMessage(client_completion_status);
+    all_clients_[client_id].server_message = std::move(close_message);
   }
   return absl::OkStatus();
 }
 
 absl::StatusOr<std::optional<ServerMessage>>
 SimpleAggregationProtocol::PollServerMessage(int64_t client_id) {
-  return std::nullopt;
+  absl::MutexLock lock(&state_mu_);
+  if (protocol_state_ == PROTOCOL_CREATED) {
+    return absl::FailedPreconditionError("The protocol hasn't been started");
+  }
+  if (client_id < 0 || client_id >= all_clients_.size()) {
+    return absl::InvalidArgumentError(
+        absl::StrFormat("client_id %ld is outside the valid range", client_id));
+  }
+  std::optional<ServerMessage> output;
+  std::swap(all_clients_[client_id].server_message, output);
+  return output;
 }
 
 absl::Status SimpleAggregationProtocol::CloseClient(
@@ -539,7 +376,7 @@ absl::Status SimpleAggregationProtocol::CloseClient(
     // Close the client only if the client is currently pending.
     if (client_state == CLIENT_PENDING) {
       FCP_LOG(INFO) << "Closing client " << client_id << " with the status "
-                    << client_status.ToString();
+                    << client_status;
       SetClientState(client_id,
                      client_status.ok() ? CLIENT_DISCARDED : CLIENT_FAILED);
     }
@@ -548,72 +385,86 @@ absl::Status SimpleAggregationProtocol::CloseClient(
   return absl::OkStatus();
 }
 
+void SimpleAggregationProtocol::CloseAllClients() {
+  FCP_CHECK(protocol_state_ == PROTOCOL_COMPLETED ||
+            protocol_state_ == PROTOCOL_ABORTED);
+  ServerMessage close_message = MakeCloseClientMessage(
+      absl::AbortedError("The protocol has terminated before the "
+                         "client input has been aggregated."));
+  for (int64_t client_id = 0; client_id < all_clients_.size(); client_id++) {
+    switch (all_clients_[client_id].state) {
+      case CLIENT_PENDING:
+        SetClientState(client_id, CLIENT_ABORTED);
+        all_clients_[client_id].server_message = close_message;
+        break;
+      case CLIENT_RECEIVED_INPUT_AND_PENDING:
+        // Please note that all clients in this state are supposed to finish
+        // and change their state to either CLIENT_COMPLETED or CLIENT_DISCARDED
+        // by the time this method is called. Hitting this case is most likely
+        // an indication of some error.  Normally all concurrent calls to
+        // ReceiveClientMessage() should get an opportunity to finish when the
+        // AwaitAggregationQueueEmpty() method is called.  At that time the
+        // the CheckpointAggregation should already be in the state where all
+        // pending Accumulate() calls should finish instantly without doing any
+        // actual work.
+        FCP_LOG(WARNING) << "Client " << client_id
+                         << " is in CLIENT_RECEIVED_INPUT_AND_PENDING state at "
+                            "the termination of the protocol.";
+        SetClientState(client_id, CLIENT_DISCARDED);
+        all_clients_[client_id].server_message = close_message;
+        break;
+      case CLIENT_COMPLETED:
+        if (protocol_state_ == PROTOCOL_ABORTED) {
+          SetClientState(client_id, CLIENT_DISCARDED);
+        }
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+bool SimpleAggregationProtocol::IsAggregationQueueEmpty() {
+  return num_clients_received_and_pending_ == 0;
+}
+
+void SimpleAggregationProtocol::AwaitAggregationQueueEmpty() {
+  FCP_CHECK(protocol_state_ == PROTOCOL_COMPLETED ||
+            protocol_state_ == PROTOCOL_ABORTED);
+  if (!state_mu_.AwaitWithTimeout(
+          absl::Condition(this,
+                          &SimpleAggregationProtocol::IsAggregationQueueEmpty),
+          kAggregationQueueWaitTimeout)) {
+    FCP_LOG(ERROR) << "Aggregation queue is not empty after "
+                   << kAggregationQueueWaitTimeout;
+  }
+}
+
 absl::Status SimpleAggregationProtocol::Complete() {
   StopOutlierDetection();
   absl::Cord result;
-  std::vector<int64_t> client_ids_to_close;
-  {
-    absl::MutexLock lock(&state_mu_);
-    FCP_RETURN_IF_ERROR(CheckProtocolState(PROTOCOL_STARTED));
-    FCP_ASSIGN_OR_RETURN(result_, CreateReport());
+  absl::MutexLock lock(&state_mu_);
+  FCP_RETURN_IF_ERROR(CheckProtocolState(PROTOCOL_STARTED));
+  auto report = CreateReport();
+  if (report.ok()) {
     SetProtocolState(PROTOCOL_COMPLETED);
-    for (int64_t client_id = 0; client_id < client_states_.size();
-         client_id++) {
-      switch (client_states_[client_id]) {
-        case CLIENT_PENDING:
-          SetClientState(client_id, CLIENT_ABORTED);
-          client_ids_to_close.push_back(client_id);
-          break;
-        case CLIENT_RECEIVED_INPUT_AND_PENDING:
-          SetClientState(client_id, CLIENT_DISCARDED);
-          client_ids_to_close.push_back(client_id);
-          break;
-        default:
-          break;
-      }
-    }
+    result_ = std::move(report.value());
+  } else {
+    SetProtocolState(PROTOCOL_ABORTED);
   }
-  for (int64_t client_id : client_ids_to_close) {
-    callback_->OnCloseClient(
-        client_id, absl::AbortedError("The protocol has completed before the "
-                                      "client input has been aggregated."));
-  }
-  return absl::OkStatus();
+  AwaitAggregationQueueEmpty();
+  CloseAllClients();
+  return report.status();
 }
 
 absl::Status SimpleAggregationProtocol::Abort() {
   StopOutlierDetection();
-  std::vector<int64_t> client_ids_to_close;
-  {
-    absl::MutexLock lock(&state_mu_);
-    FCP_RETURN_IF_ERROR(CheckProtocolState(PROTOCOL_STARTED));
-    aggregation_finished_ = true;
-    SetProtocolState(PROTOCOL_ABORTED);
-    for (int64_t client_id = 0; client_id < client_states_.size();
-         client_id++) {
-      switch (client_states_[client_id]) {
-        case CLIENT_PENDING:
-          SetClientState(client_id, CLIENT_ABORTED);
-          client_ids_to_close.push_back(client_id);
-          break;
-        case CLIENT_RECEIVED_INPUT_AND_PENDING:
-          SetClientState(client_id, CLIENT_DISCARDED);
-          client_ids_to_close.push_back(client_id);
-          break;
-        case CLIENT_COMPLETED:
-          SetClientState(client_id, CLIENT_DISCARDED);
-          break;
-        default:
-          break;
-      }
-    }
-  }
-
-  for (int64_t client_id : client_ids_to_close) {
-    callback_->OnCloseClient(
-        client_id, absl::AbortedError("The protocol has aborted before the "
-                                      "client input has been aggregated."));
-  }
+  absl::MutexLock lock(&state_mu_);
+  FCP_RETURN_IF_ERROR(CheckProtocolState(PROTOCOL_STARTED));
+  checkpoint_aggregator_->Abort();
+  SetProtocolState(PROTOCOL_ABORTED);
+  AwaitAggregationQueueEmpty();
+  CloseAllClients();
   return absl::OkStatus();
 }
 
@@ -623,11 +474,11 @@ StatusMessage SimpleAggregationProtocol::GetStatus() {
                                   num_clients_aggregated_ +
                                   num_clients_discarded_;
   StatusMessage message;
+  message.set_protocol_state(protocol_state_);
   message.set_num_clients_completed(num_clients_completed);
   message.set_num_clients_failed(num_clients_failed_);
-  message.set_num_clients_pending(client_states_.size() -
-                                  num_clients_completed - num_clients_failed_ -
-                                  num_clients_aborted_);
+  message.set_num_clients_pending(all_clients_.size() - num_clients_completed -
+                                  num_clients_failed_ - num_clients_aborted_);
   message.set_num_inputs_aggregated_and_included(num_clients_aggregated_);
   message.set_num_inputs_aggregated_and_pending(
       num_clients_received_and_pending_);
@@ -640,6 +491,18 @@ absl::StatusOr<absl::Cord> SimpleAggregationProtocol::GetResult() {
   absl::MutexLock lock(&state_mu_);
   FCP_RETURN_IF_ERROR(CheckProtocolState(PROTOCOL_COMPLETED));
   return result_;
+}
+
+absl::StatusOr<bool> SimpleAggregationProtocol::IsClientClosed(
+    int64_t client_id) {
+  absl::MutexLock lock(&state_mu_);
+  if (client_id < 0 || client_id >= all_clients_.size()) {
+    return absl::InvalidArgumentError(
+        absl::StrFormat("client_id %ld is outside the valid range", client_id));
+  }
+  ClientState client_state = all_clients_[client_id].state;
+  return client_state == CLIENT_COMPLETED || client_state == CLIENT_ABORTED ||
+         client_state == CLIENT_DISCARDED || client_state == CLIENT_FAILED;
 }
 
 void SimpleAggregationProtocol::ScheduleOutlierDetection() {
@@ -672,7 +535,7 @@ void SimpleAggregationProtocol::PerformOutlierDetection() {
 
   std::vector<int64_t> client_ids_to_close;
   // Perform this part of the algorithm under the lock to ensure exclusive
-  // access to the client_states_ and pending_clients_
+  // access to the all_clients_ and pending_clients_
   {
     absl::MutexLock lock(&state_mu_);
     FCP_CHECK(CheckProtocolState(PROTOCOL_STARTED).ok())
@@ -713,16 +576,12 @@ void SimpleAggregationProtocol::PerformOutlierDetection() {
       }
     }
 
+    ServerMessage close_message = MakeCloseClientMessage(absl::AbortedError(
+        "Client aborted due to being detected as an outlier"));
     for (int64_t client_id : client_ids_to_close) {
       SetClientState(client_id, CLIENT_ABORTED);
+      all_clients_[client_id].server_message = close_message;
     }
-  }
-
-  // Send notifications outside of the mutex scope.
-  for (int64_t client_id : client_ids_to_close) {
-    callback_->OnCloseClient(
-        client_id, absl::AbortedError(
-                       "Client aborted due to being detected as an outlier"));
   }
 }
 

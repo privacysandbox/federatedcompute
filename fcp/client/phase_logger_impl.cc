@@ -15,6 +15,8 @@
  */
 #include "fcp/client/phase_logger_impl.h"
 
+#include <cstdint>
+#include <optional>
 #include <string>
 
 #include "absl/strings/string_view.h"
@@ -285,6 +287,15 @@ void PhaseLoggerImpl::LogEligibilityEvalComputationInterrupted(
   LogEligibilityEvalComputationLatency(run_plan_start_time, reference_time);
 }
 
+void PhaseLoggerImpl::LogEligibilityEvalComputationErrorNonfatal(
+    absl::Status error_status) {
+  std::string error_message =
+      GetErrorMessage(error_status, kEligibilityComputationErrorPrefix,
+                      /* keep_error_message= */ true);
+  event_publisher_->PublishEligibilityEvalComputationErrorNonfatal(
+      error_message);
+}
+
 void PhaseLoggerImpl::LogEligibilityEvalComputationCompleted(
     const ExampleStats& example_stats, absl::Time run_plan_start_time,
     absl::Time reference_time) {
@@ -543,17 +554,19 @@ void PhaseLoggerImpl::LogCheckinPlanUriReceived(
       OperationalStats::Event::EVENT_KIND_CHECKIN_PLAN_URI_RECEIVED);
 }
 
-void PhaseLoggerImpl::LogCheckinCompleted(absl::string_view task_name,
-                                          const NetworkStats& network_stats,
-                                          absl::Time time_before_checkin,
-                                          absl::Time time_before_plan_download,
-                                          absl::Time reference_time) {
+void PhaseLoggerImpl::LogCheckinCompleted(
+    absl::string_view task_name, const NetworkStats& network_stats,
+    absl::Time time_before_checkin, absl::Time time_before_plan_download,
+    absl::Time reference_time, std::optional<int64_t> min_sep_policy_index) {
   absl::Duration duration = absl::Now() - time_before_plan_download;
   event_publisher_->PublishCheckinFinishedV2(network_stats, duration);
   // We already have set the task name when LogCheckinPlanUriReceived was
   // called, so we only have to add the event.
   opstats_logger_->AddEvent(
       OperationalStats::Event::EVENT_KIND_CHECKIN_ACCEPTED);
+  if (min_sep_policy_index.has_value()) {
+    opstats_logger_->SetMinSepPolicyIndex(min_sep_policy_index.value());
+  }
   opstats_logger_->StopLoggingForTheCurrentPhase();
   // The 'EligibilityEvalCheckinLatency' should cover the whole period from
   // eligibility eval checkin to completion (and not just the period from EET
@@ -561,7 +574,7 @@ void PhaseLoggerImpl::LogCheckinCompleted(absl::string_view task_name,
   LogCheckinLatency(time_before_checkin, reference_time);
 }
 
-void PhaseLoggerImpl::LogCollectionFirstAccessTime(
+void PhaseLoggerImpl::MaybeLogCollectionFirstAccessTime(
     absl::string_view collection_uri) {
   opstats_logger_->RecordCollectionFirstAccessTime(collection_uri, absl::Now());
 }

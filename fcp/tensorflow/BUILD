@@ -13,7 +13,7 @@
 # limitations under the License.
 
 load("@com_github_grpc_grpc//bazel:python_rules.bzl", "py_proto_library")
-load("@system_provided_tf//:system_provided_tf.bzl", "tf_custom_op_library")
+load("//fcp/tensorflow/pip_tf:defs.bzl", "tf_custom_op_library")
 load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 load("//fcp:config.bzl", "FCP_COPTS")
 load("//fcp/tracing:build_defs.bzl", "tracing_schema_cc_library")
@@ -45,42 +45,7 @@ py_test(
     name = "tf_py_smoke_test",
     srcs = ["tf_py_smoke_test.py"],
     python_version = "PY3",
-)
-
-# Library for converting between the FCP and TensorFlow versions of a Status.
-# Note that this library is intended to be usable in an op .so, thus it depends
-# on TF headers but *not* an implementation (the final binary needs to link it
-# in). We must also use the right copy of headers, depending on whether the
-# build is targeting a system-provided TF library or a bazel-built one.
-cc_library(
-    name = "status",
-    srcs = [
-        "status.cc",
-    ],
-    hdrs = [
-        "status.h",
-    ],
-    copts = FCP_COPTS,
-    deps = [
-        "//fcp/base",
-    ] + select({
-        "@system_provided_tf//:system_provided_tf_build": ["@system_provided_tf//:tf_headers"],
-        "//conditions:default": ["@org_tensorflow//tensorflow/core:framework_headers_lib"],
-    }),
-)
-
-cc_test(
-    name = "status_test",
-    srcs = [
-        "status_test.cc",
-    ],
-    copts = FCP_COPTS,
-    deps = [
-        ":status",
-        "@com_google_googletest//:gtest_main",
-        # See remarks on :status about the TF framework dependency
-        "@org_tensorflow//tensorflow/core:framework",
-    ],
+    deps = ["@pypi_tensorflow//:pkg"],
 )
 
 cc_library(
@@ -127,9 +92,10 @@ cc_library(
     hdrs = ["tf_session.h"],
     copts = FCP_COPTS,
     deps = [
-        ":status",
         ":tracing_schema",
+        ":tracing_schema_fb",
         "//fcp/base",
+        "//fcp/base:meta",
         "//fcp/base:process_unique_id",
         "//fcp/base:result",
         "//fcp/protos:plan_cc_proto",
@@ -138,6 +104,7 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:cord",
         "@org_tensorflow//tensorflow/core:core_cpu",
+        "@org_tensorflow//tensorflow/core:framework",
         "@org_tensorflow//tensorflow/core:protos_all_cc",
         "@org_tensorflow//tensorflow/core:tensorflow",
     ],
@@ -239,8 +206,11 @@ EXTERNAL_DATASET_OP_SRCS = ["external_dataset_op.cc"]
 
 EXTERNAL_DATASET_OP_DEPS = [
     ":external_dataset",
-    ":status",
+    "@com_google_absl//absl/status",
+    "@com_google_absl//absl/status:statusor",
     "@com_google_absl//absl/strings:str_format",
+    "@com_google_absl//absl/synchronization",
+    "@com_google_absl//absl/types:span",
     "//fcp/base:random_token",
 ]
 
@@ -287,7 +257,10 @@ tf_custom_op_py_library(
         ":external_dataset_op_lib",
     ],
     visibility = ["//visibility:public"],
-    deps = [":gen_external_dataset_py"],
+    deps = [
+        ":gen_external_dataset_py",
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 # The dataset API isn't really usable from C++, so we generate a GraphDef for
@@ -297,7 +270,10 @@ py_binary(
     testonly = True,
     srcs = ["make_external_dataset_test_graph.py"],
     python_version = "PY3",
-    deps = [":external_dataset_py"],
+    deps = [
+        ":external_dataset_py",
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 genrule(
@@ -335,6 +311,10 @@ tf_cc_test(
         ":external_dataset",
         ":external_dataset_op_lib",
         ":test_selector_cc_proto",
+        "//fcp/base",
+        "//fcp/base:random_token",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_googletest//:gtest_main",
         "@com_google_protobuf//:protobuf",
         "@org_tensorflow//tensorflow/core:core_cpu",
@@ -343,12 +323,18 @@ tf_cc_test(
         "@org_tensorflow//tensorflow/core:protos_all_cc",
         "@org_tensorflow//tensorflow/core:tensorflow_opensource",
         "@org_tensorflow//tensorflow/core:testlib",
+        "@org_tensorflow//tensorflow/core/platform:tstring",
+        "@org_tensorflow//tensorflow/tsl/platform:status",
     ],
 )
 
 CRC32_OP_SRCS = [
     "crc32_op.cc",
     "tensor_crc32.cc",
+]
+
+CRC32_OP_DEPS = [
+    "@com_google_absl//absl/status",
 ]
 
 # Custom op to compute the CRC32 checksum of a tensor.
@@ -361,7 +347,7 @@ cc_library(
     hdrs = ["tensor_crc32.h"],
     copts = FCP_COPTS,
     visibility = ["//visibility:public"],
-    deps = [
+    deps = CRC32_OP_DEPS + [
         "@org_tensorflow//tensorflow/core:framework",
         "@org_tensorflow//tensorflow/core:lib",
     ],
@@ -373,6 +359,7 @@ tf_custom_op_library(
     name = "_crc32_op.so",
     srcs = CRC32_OP_SRCS + ["tensor_crc32.h"],
     copts = FCP_COPTS,
+    deps = CRC32_OP_DEPS,
 )
 
 # Generates the basic op wrapper for use in Python.
@@ -391,20 +378,27 @@ tf_custom_op_py_library(
     kernels = [
         ":crc32_op_lib",
     ],
-    deps = [":gen_crc32_py"],
+    deps = [
+        ":gen_crc32_py",
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 py_test(
     name = "crc32_test",
     srcs = ["crc32_test.py"],
     python_version = "PY3",
-    deps = [":crc32_py"],
+    deps = [
+        ":crc32_py",
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 EXAMPLE_SELECTOR_FUSER_OP_SRCS = ["example_selector_fuser_op.cc"]
 
 EXAMPLE_SELECTOR_FUSER_OP_DEPS = [
     "@com_google_protobuf//:protobuf",
+    "@com_google_absl//absl/status",
     "//fcp/protos:plan_cc_proto",
 ]
 
@@ -446,7 +440,10 @@ tf_custom_op_py_library(
         ":example_selector_fuser_op_lib",
     ],
     visibility = ["//visibility:public"],
-    deps = [":gen_example_selector_fuser_op"],
+    deps = [
+        ":gen_example_selector_fuser_op",
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 py_proto_library(
@@ -465,6 +462,7 @@ py_test(
         ":example_selector_fuser_py",
         ":test_selector_py_pb2",
         "//fcp/protos:plan_py_pb2",
+        "@pypi_tensorflow//:pkg",
     ],
 )
 
@@ -498,8 +496,11 @@ SERVE_SLICES_OP_SRCS = ["serve_slices_op.cc"]
 
 SERVE_SLICES_OP_DEPS = [
     ":serve_slices_registry",
+    "@com_google_absl//absl/status",
     "@com_google_absl//absl/strings",
+    "@com_google_absl//absl/types:span",
     "@com_google_absl//absl/strings:str_format",
+    "//fcp/base:random_token",
 ]
 
 # Custom op to register slices to serve for a `federated_select`.
@@ -551,7 +552,10 @@ tf_custom_op_py_library(
         ":serve_slices_op_lib",
     ],
     visibility = ["//visibility:public"],
-    deps = [":gen_serve_slices_py"],
+    deps = [
+        ":gen_serve_slices_py",
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 # Generate a GraphDef for testing `ServeSlices` using Python.
@@ -560,7 +564,11 @@ py_binary(
     testonly = True,
     srcs = ["make_serve_slices_test_graph.py"],
     python_version = "PY3",
-    deps = [":serve_slices_py"],
+    deps = [
+        ":serve_slices_py",
+        "@pypi_absl_py//:pkg",
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 genrule(
@@ -582,6 +590,7 @@ tf_cc_test(
     deps = [
         ":serve_slices_op_lib",
         ":serve_slices_registry",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest_main",
         "@com_google_protobuf//:protobuf",
@@ -644,7 +653,10 @@ tf_custom_op_py_library(
         ":make_slices_selector_example_selector_op_lib",
     ],
     visibility = ["//visibility:public"],
-    deps = [":gen_make_slices_selector_example_selector_py"],
+    deps = [
+        ":gen_make_slices_selector_example_selector_py",
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 # Test `MakeSlicesSelectorExampleSelector` using Python.
@@ -656,6 +668,7 @@ py_test(
     deps = [
         ":make_slices_selector_example_selector_py",
         "//fcp/protos:plan_py_pb2",
+        "@pypi_tensorflow//:pkg",
     ],
 )
 
@@ -663,6 +676,8 @@ APPEND_SLICES_OP_SRCS = ["append_slices_op.cc"]
 
 APPEND_SLICES_OP_DEPS = [
     "@com_google_absl//absl/base:core_headers",
+    "@com_google_absl//absl/status",
+    "@com_google_absl//absl/strings",
     "@com_google_absl//absl/synchronization",
     "@org_tensorflow//tensorflow/core/util:saved_tensor_slice_proto_cc",
 ]
@@ -710,7 +725,10 @@ tf_custom_op_py_library(
         ":append_slices_op_lib",
     ],
     visibility = ["//visibility:public"],
-    deps = [":gen_append_slices_py"],
+    deps = [
+        ":gen_append_slices_py",
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 # Test `AppendSlices` and `MergeAppendedSlices` using Python.
@@ -722,6 +740,7 @@ py_test(
     deps = [
         ":append_slices_py",
         ":delete_file_py",
+        "@pypi_tensorflow//:pkg",
     ],
 )
 
@@ -729,6 +748,8 @@ DELETE_FILE_OP_SRCS = ["delete_file_op.cc"]
 
 DELETE_FILE_OP_DEPS = [
     "@com_google_absl//absl/base:core_headers",
+    "@com_google_absl//absl/log",
+    "@com_google_absl//absl/status",
     "@com_google_absl//absl/synchronization",
 ]
 
@@ -774,7 +795,10 @@ tf_custom_op_py_library(
         ":delete_file_op_lib",
     ],
     visibility = ["//visibility:public"],
-    deps = [":gen_delete_file_py"],
+    deps = [
+        ":gen_delete_file_py",
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 # Test `DeleteFile` using Python.
@@ -783,7 +807,10 @@ py_test(
     testonly = True,
     srcs = ["delete_file_test.py"],
     python_version = "PY3",
-    deps = [":delete_file_py"],
+    deps = [
+        ":delete_file_py",
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 TENSOR_NAME_OP_SRCS = ["tensor_name_op.cc"]
@@ -835,7 +862,10 @@ tf_custom_op_py_library(
         ":tensor_name_op_lib",
     ],
     visibility = ["//visibility:public"],
-    deps = [":gen_tensor_name_py"],
+    deps = [
+        ":gen_tensor_name_py",
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 # Test `TensorName` using Python.
@@ -844,7 +874,10 @@ py_test(
     testonly = True,
     srcs = ["tensor_name_test.py"],
     python_version = "PY3",
-    deps = [":tensor_name_py"],
+    deps = [
+        ":tensor_name_py",
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 TASK_ELIGIBILITY_INFO_OPS_SRCS = ["task_eligibility_info_ops.cc"]
@@ -894,7 +927,10 @@ tf_custom_op_py_library(
         ":task_eligibility_info_ops_lib",
     ],
     visibility = ["//visibility:public"],
-    deps = [":gen_task_eligibility_info_ops_py"],
+    deps = [
+        ":gen_task_eligibility_info_ops_py",
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 py_test(
@@ -904,6 +940,7 @@ py_test(
     deps = [
         ":task_eligibility_info_ops_py",
         "//fcp/protos:federated_api_py_pb2",
+        "@pypi_tensorflow//:pkg",
     ],
 )
 
@@ -915,6 +952,8 @@ DICTIONARY_OPS_DEPS = [
     "//fcp/dictionary:dictionary_cc_proto",
     "@com_google_absl//absl/status",
     "@com_google_absl//absl/status:statusor",
+    "@com_google_absl//absl/strings",
+    "@org_tensorflow//tensorflow/tsl/platform:tstring",
 ]
 
 cc_library(
@@ -960,6 +999,7 @@ tf_custom_op_py_library(
     deps = [
         ":gen_dictionary_ops_py",
         "//fcp/dictionary:dictionary_py_pb2",
+        "@pypi_tensorflow//:pkg",
     ],
 )
 
@@ -970,5 +1010,8 @@ py_test(
     deps = [
         ":dictionary_ops_py",
         "//fcp/dictionary:dictionary_py_pb2",
+        "@com_google_protobuf//:protobuf_python",
+        "@pypi_absl_py//:pkg",
+        "@pypi_tensorflow//:pkg",
     ],
 )

@@ -1,17 +1,24 @@
 #include "fcp/aggregation/protocol/config_converter.h"
 
+#include <initializer_list>
+#include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "fcp/testing/parse_text_proto.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "fcp/aggregation/core/intrinsic.h"
 #include "fcp/aggregation/core/tensor.h"
 #include "fcp/aggregation/core/tensor.pb.h"
+#include "fcp/aggregation/core/tensor_aggregator_registry.h"
 #include "fcp/aggregation/core/tensor_shape.h"
+#include "fcp/aggregation/core/tensor_spec.h"
 #include "fcp/aggregation/protocol/configuration.pb.h"
 #include "fcp/aggregation/testing/test_data.h"
 #include "fcp/aggregation/testing/testing.h"
+#include "fcp/base/monitoring.h"
 #include "fcp/testing/testing.h"
 
 namespace fcp {
@@ -20,9 +27,36 @@ namespace {
 
 using testing::SizeIs;
 
-TEST(ConfigConverterTest, ConvertEmpty) {
+class MockFactory : public TensorAggregatorFactory {
+  MOCK_METHOD(StatusOr<std::unique_ptr<TensorAggregator>>, Create,
+              (const Intrinsic&), (const override));
+};
+
+class ConfigConverterTest : public ::testing::Test {
+ protected:
+  ConfigConverterTest() {
+    if (!is_registered_) {
+      MockFactory mock_factory;
+      RegisterAggregatorFactory("my_intrinsic", &mock_factory);
+      RegisterAggregatorFactory("inner_intrinsic", &mock_factory);
+      RegisterAggregatorFactory("outer_intrinsic", &mock_factory);
+      RegisterAggregatorFactory("other_intrinsic", &mock_factory);
+      RegisterAggregatorFactory("fedsql_group_by", &mock_factory);
+      RegisterAggregatorFactory("GoogleSQL:sum", &mock_factory);
+      RegisterAggregatorFactory("GoogleSQL:max", &mock_factory);
+      is_registered_ = true;
+    }
+  }
+
+ private:
+  static bool is_registered_;
+};
+
+bool ConfigConverterTest::is_registered_ = false;
+
+TEST_F(ConfigConverterTest, ConvertEmpty) {
   Configuration config = PARSE_TEXT_PROTO(R"pb(
-    aggregation_configs: { intrinsic_uri: "my_intrinsic" }
+    intrinsic_configs: { intrinsic_uri: "my_intrinsic" }
   )pb");
   StatusOr<std::vector<Intrinsic>> parsed_intrinsics = ParseFromConfig(config);
   ASSERT_THAT(parsed_intrinsics, IsOk());
@@ -31,25 +65,22 @@ TEST(ConfigConverterTest, ConvertEmpty) {
               EqIntrinsic(Intrinsic{"my_intrinsic", {}, {}, {}, {}}));
 }
 
-TEST(ConfigConverterTest, ConvertInputs) {
+TEST_F(ConfigConverterTest, ConvertInputs) {
   Configuration config = PARSE_TEXT_PROTO(R"pb(
-    aggregation_configs: {
+    intrinsic_configs: {
       intrinsic_uri: "my_intrinsic"
       intrinsic_args {
         input_tensor {
           name: "foo"
           dtype: DT_INT32
-          shape { dim { size: 8 } }
+          shape { dim_sizes: 8 }
         }
       }
       intrinsic_args {
         input_tensor {
           name: "bar"
           dtype: DT_FLOAT
-          shape {
-            dim { size: 2 }
-            dim { size: 3 }
-          }
+          shape { dim_sizes: 2 dim_sizes: 3 }
         }
       }
     }
@@ -67,22 +98,19 @@ TEST(ConfigConverterTest, ConvertInputs) {
                                     {}}));
 }
 
-TEST(ConfigConverterTest, ConvertOutputs) {
+TEST_F(ConfigConverterTest, ConvertOutputs) {
   Configuration config = PARSE_TEXT_PROTO(R"pb(
-    aggregation_configs: {
+    intrinsic_configs: {
       intrinsic_uri: "my_intrinsic"
       output_tensors {
         name: "foo_out"
         dtype: DT_INT32
-        shape { dim { size: 16 } }
+        shape { dim_sizes: 16 }
       }
       output_tensors {
         name: "bar_out"
         dtype: DT_FLOAT
-        shape {
-          dim { size: 3 }
-          dim { size: 4 }
-        }
+        shape { dim_sizes: 3 dim_sizes: 4 }
       }
     }
   )pb");
@@ -98,56 +126,53 @@ TEST(ConfigConverterTest, ConvertOutputs) {
                                     {}}));
 }
 
-TEST(ConfigConverterTest, ConvertParams) {
+TEST_F(ConfigConverterTest, ConvertParams) {
   Configuration config = PARSE_TEXT_PROTO(R"pb(
-    aggregation_configs: {
+    intrinsic_configs: {
       intrinsic_uri: "my_intrinsic"
       intrinsic_args {
         parameter {
           dtype: DT_FLOAT
-          tensor_shape {
-            dim { size: 2 }
-            dim { size: 3 }
-          }
-          float_val: 1
-          float_val: 2
-          float_val: 3
-          float_val: 4
-          float_val: 5
-          float_val: 6
+          shape { dim_sizes: 2 dim_sizes: 3 }
         }
       }
     }
   )pb");
+  std::initializer_list<float> values{1, 2, 3, 4, 5, 6};
+  std::string data =
+      std::string(reinterpret_cast<char*>(std::vector(values).data()),
+                  values.size() * sizeof(float));
+  *config.mutable_intrinsic_configs(0)
+       ->mutable_intrinsic_args(0)
+       ->mutable_parameter()
+       ->mutable_content() = data;
   StatusOr<std::vector<Intrinsic>> parsed_intrinsics = ParseFromConfig(config);
   ASSERT_THAT(parsed_intrinsics, IsOk());
   ASSERT_THAT(parsed_intrinsics.value(), SizeIs(1));
   Tensor expected_tensor =
-      Tensor::Create(DT_FLOAT, {2, 3},
-                     CreateTestData<float>({1, 2, 3, 4, 5, 6}))
-          .value();
+      Tensor::Create(DT_FLOAT, {2, 3}, CreateTestData<float>(values)).value();
   Intrinsic expected{"my_intrinsic", {}, {}, {}, {}};
   expected.parameters.push_back(std::move(expected_tensor));
   ASSERT_THAT(parsed_intrinsics.value()[0], EqIntrinsic(std::move(expected)));
 }
 
-TEST(ConfigConverterTest, ConvertInnerAggregations) {
+TEST_F(ConfigConverterTest, ConvertInnerAggregations) {
   Configuration config = PARSE_TEXT_PROTO(R"pb(
-    aggregation_configs: {
+    intrinsic_configs: {
       intrinsic_uri: "my_intrinsic"
-      inner_aggregations {
+      inner_intrinsics {
         intrinsic_uri: "inner_intrinsic"
         intrinsic_args {
           input_tensor {
             name: "foo"
             dtype: DT_INT32
-            shape { dim { size: 8 } }
+            shape { dim_sizes: 8 }
           }
         }
         output_tensors {
           name: "foo_out"
           dtype: DT_INT32
-          shape { dim { size: 16 } }
+          shape { dim_sizes: 16 }
         }
       }
     }
@@ -165,23 +190,23 @@ TEST(ConfigConverterTest, ConvertInnerAggregations) {
   ASSERT_THAT(parsed_intrinsics.value()[0], EqIntrinsic(std::move(expected)));
 }
 
-TEST(ConfigConverterTest, ConvertFedSql_GroupByAlreadyPresent) {
+TEST_F(ConfigConverterTest, ConvertFedSql_GroupByAlreadyPresent) {
   Configuration config = PARSE_TEXT_PROTO(R"pb(
-    aggregation_configs: {
+    intrinsic_configs: {
       intrinsic_uri: "fedsql_group_by"
       intrinsic_args {
         input_tensor {
           name: "foo"
           dtype: DT_INT32
-          shape { dim { size: -1 } }
+          shape { dim_sizes: -1 }
         }
       }
       output_tensors {
         name: "foo_out"
         dtype: DT_INT32
-        shape { dim { size: -1 } }
+        shape { dim_sizes: -1 }
       }
-      inner_aggregations {
+      inner_intrinsics {
         intrinsic_uri: "GoogleSQL:sum"
         intrinsic_args {
           input_tensor {
@@ -196,7 +221,7 @@ TEST(ConfigConverterTest, ConvertFedSql_GroupByAlreadyPresent) {
           shape {}
         }
       }
-      inner_aggregations {
+      inner_intrinsics {
         intrinsic_uri: "GoogleSQL:max"
         intrinsic_args {
           input_tensor {
@@ -237,9 +262,9 @@ TEST(ConfigConverterTest, ConvertFedSql_GroupByAlreadyPresent) {
   ASSERT_THAT(parsed_intrinsics.value()[0], EqIntrinsic(std::move(expected)));
 }
 
-TEST(ConfigConverterTest, ConvertFedSql_WrapWhenGroupByNotPresent) {
+TEST_F(ConfigConverterTest, ConvertFedSql_WrapWhenGroupByNotPresent) {
   Configuration config = PARSE_TEXT_PROTO(R"pb(
-    aggregation_configs: {
+    intrinsic_configs: {
       intrinsic_uri: "GoogleSQL:sum"
       intrinsic_args {
         input_tensor {
@@ -254,7 +279,7 @@ TEST(ConfigConverterTest, ConvertFedSql_WrapWhenGroupByNotPresent) {
         shape {}
       }
     }
-    aggregation_configs: {
+    intrinsic_configs: {
       intrinsic_uri: "other_intrinsic"
       intrinsic_args {
         input_tensor {
@@ -269,7 +294,7 @@ TEST(ConfigConverterTest, ConvertFedSql_WrapWhenGroupByNotPresent) {
         shape {}
       }
     }
-    aggregation_configs: {
+    intrinsic_configs: {
       intrinsic_uri: "GoogleSQL:max"
       intrinsic_args {
         input_tensor {
@@ -316,11 +341,11 @@ TEST(ConfigConverterTest, ConvertFedSql_WrapWhenGroupByNotPresent) {
               EqIntrinsic(std::move(expected_groupby)));
 }
 
-TEST(ConfigConverterTest, ConvertFedSql_WrapWhenGroupByNotPresent_Nested) {
+TEST_F(ConfigConverterTest, ConvertFedSql_WrapWhenGroupByNotPresent_Nested) {
   Configuration config = PARSE_TEXT_PROTO(R"pb(
-    aggregation_configs: {
+    intrinsic_configs: {
       intrinsic_uri: "outer_intrinsic"
-      inner_aggregations: {
+      inner_intrinsics: {
         intrinsic_uri: "GoogleSQL:sum"
         intrinsic_args {
           input_tensor {
@@ -335,7 +360,7 @@ TEST(ConfigConverterTest, ConvertFedSql_WrapWhenGroupByNotPresent_Nested) {
           shape {}
         }
       }
-      inner_aggregations: {
+      inner_intrinsics: {
         intrinsic_uri: "other_intrinsic"
         intrinsic_args {
           input_tensor {
@@ -350,7 +375,7 @@ TEST(ConfigConverterTest, ConvertFedSql_WrapWhenGroupByNotPresent_Nested) {
           shape {}
         }
       }
-      inner_aggregations: {
+      inner_intrinsics: {
         intrinsic_uri: "GoogleSQL:max"
         intrinsic_args {
           input_tensor {

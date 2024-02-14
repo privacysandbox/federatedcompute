@@ -36,14 +36,17 @@ py_library(
     deps = [
         ":http_actions",
         ":media",
+        "//fcp/aggregation/core:tensor_py_pb2",
         "//fcp/aggregation/protocol:configuration_py_pb2",
         "//fcp/aggregation/protocol:py_pb2",
         "//fcp/aggregation/protocol/python:aggregation_protocol",
         "//fcp/aggregation/tensorflow/python:aggregation_protocols",
         "//fcp/protos:plan_py_pb2",
         "//fcp/protos/federatedcompute:federated_compute_py_pb2",
+        "@com_google_googleapis//google/longrunning:operations_py_proto",
         "@com_google_googleapis//google/rpc:code_py_proto",
-        "@googleapis_for_longrunning//google/longrunning:longrunning_py_proto",
+        "@pypi_absl_py//:pkg",
+        "@pypi_tensorflow//:pkg",
     ],
 )
 
@@ -63,6 +66,8 @@ py_test(
         "//fcp/aggregation/tensorflow/python:aggregation_protocols",
         "//fcp/protos:plan_py_pb2",
         "//fcp/protos/federatedcompute:federated_compute_py_pb2",
+        "@pypi_absl_py//:pkg",
+        "@pypi_tensorflow//:pkg",
     ],
 )
 
@@ -70,6 +75,10 @@ py_library(
     name = "checkpoint_tensor_reference",
     srcs = ["checkpoint_tensor_reference.py"],
     srcs_version = "PY3",
+    deps = [
+        "@pypi_tensorflow//:pkg",
+        "@pypi_tensorflow_federated//:pkg",
+    ],
 )
 
 py_test(
@@ -80,6 +89,10 @@ py_test(
     deps = [
         ":checkpoint_tensor_reference",
         ":test_utils",
+        "@pypi_absl_py//:pkg",
+        "@pypi_numpy//:pkg",
+        "@pypi_tensorflow//:pkg",
+        "@pypi_tensorflow_federated//:pkg",
     ],
 )
 
@@ -92,6 +105,7 @@ py_library(
         "//fcp/protos:population_eligibility_spec_py_pb2",
         "//fcp/protos/federatedcompute:federated_compute_py_pb2",
         "@com_google_googleapis//google/rpc:code_py_proto",
+        "@pypi_absl_py//:pkg",
     ],
 )
 
@@ -106,6 +120,7 @@ py_test(
         "//fcp/protos:population_eligibility_spec_py_pb2",
         "//fcp/protos/federatedcompute:federated_compute_py_pb2",
         "@com_google_googleapis//google/rpc:code_py_proto",
+        "@pypi_absl_py//:pkg",
     ],
 )
 
@@ -113,6 +128,9 @@ py_library(
     name = "federated_computation",
     srcs = ["federated_computation.py"],
     srcs_version = "PY3",
+    deps = [
+        "@pypi_tensorflow_federated//:pkg",
+    ],
 )
 
 py_test(
@@ -120,7 +138,13 @@ py_test(
     srcs = ["federated_computation_test.py"],
     python_version = "PY3",
     srcs_version = "PY3",
-    deps = [":federated_computation"],
+    deps = [
+        ":federated_computation",
+        "@pypi_absl_py//:pkg",
+        "@pypi_numpy//:pkg",
+        "@pypi_tensorflow//:pkg",
+        "@pypi_tensorflow_federated//:pkg",
+    ],
 )
 
 py_library(
@@ -139,6 +163,12 @@ py_library(
         "//fcp/artifact_building:plan_utils",
         "//fcp/artifact_building:variable_helpers",
         "//fcp/protos:plan_py_pb2",
+        "@pypi_absl_py//:pkg",
+        "@pypi_attrs//:pkg",
+        "@pypi_dm_tree//:pkg",
+        "@pypi_numpy//:pkg",
+        "@pypi_tensorflow//:pkg",
+        "@pypi_tensorflow_federated//:pkg",
     ],
 )
 
@@ -159,6 +189,11 @@ py_test(
         "//fcp/artifact_building:plan_utils",
         "//fcp/artifact_building:variable_helpers",
         "//fcp/protos:plan_py_pb2",
+        "@pypi_absl_py//:pkg",
+        "@pypi_attrs//:pkg",
+        "@pypi_numpy//:pkg",
+        "@pypi_tensorflow//:pkg",
+        "@pypi_tensorflow_federated//:pkg",
     ],
 )
 
@@ -169,6 +204,8 @@ py_library(
     deps = [
         "//fcp/protos:plan_py_pb2",
         "//fcp/protos:population_eligibility_spec_py_pb2",
+        "@pypi_numpy//:pkg",
+        "@pypi_tensorflow_federated//:pkg",
     ],
 )
 
@@ -181,6 +218,9 @@ py_test(
         ":federated_data_source",
         "//fcp/protos:plan_py_pb2",
         "//fcp/protos:population_eligibility_spec_py_pb2",
+        "@pypi_absl_py//:pkg",
+        "@pypi_numpy//:pkg",
+        "@pypi_tensorflow_federated//:pkg",
     ],
 )
 
@@ -196,6 +236,10 @@ py_test(
         "//fcp/client:client_runner_example_data_py_pb2",
         "//fcp/protos:plan_py_pb2",
         "//fcp/protos:population_eligibility_spec_py_pb2",
+        "@pypi_absl_py//:pkg",
+        "@pypi_numpy//:pkg",
+        "@pypi_tensorflow//:pkg",
+        "@pypi_tensorflow_federated//:pkg",
     ],
 )
 
@@ -203,7 +247,11 @@ py_library(
     name = "http_actions",
     srcs = ["http_actions.py"],
     srcs_version = "PY3",
-    deps = ["@com_google_googleapis//google/api:annotations_py_proto"],
+    deps = [
+        "@com_google_googleapis//google/api:annotations_py_proto",
+        "@com_google_protobuf//:protobuf_python",
+        "@pypi_absl_py//:pkg",
+    ],
 )
 
 py_test(
@@ -215,6 +263,7 @@ py_test(
     deps = [
         ":http_actions",
         "//fcp/protos/federatedcompute:federated_compute_py_pb2",
+        "@pypi_absl_py//:pkg",
     ],
 )
 
@@ -237,6 +286,7 @@ py_test(
         ":http_actions",
         ":media",
         "//fcp/protos/federatedcompute:federated_compute_py_pb2",
+        "@pypi_absl_py//:pkg",
     ],
 )
 
@@ -244,7 +294,11 @@ py_library(
     name = "plan_utils",
     srcs = ["plan_utils.py"],
     srcs_version = "PY3",
-    deps = ["//fcp/protos:plan_py_pb2"],
+    deps = [
+        "//fcp/protos:plan_py_pb2",
+        "@com_google_protobuf//:protobuf_python",
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 py_test(
@@ -257,6 +311,8 @@ py_test(
         ":plan_utils",
         ":test_utils",
         "//fcp/protos:plan_py_pb2",
+        "@pypi_absl_py//:pkg",
+        "@pypi_tensorflow//:pkg",
     ],
 )
 
@@ -274,6 +330,7 @@ py_library(
         "//fcp/protos:plan_py_pb2",
         "//fcp/protos:population_eligibility_spec_py_pb2",
         "//fcp/protos/federatedcompute:federated_compute_py_pb2",
+        "@pypi_absl_py//:pkg",
     ],
 )
 
@@ -292,7 +349,9 @@ py_test(
         "//fcp/protos:population_eligibility_spec_py_pb2",
         "//fcp/protos/federatedcompute:federated_compute_py_pb2",
         "//fcp/tensorflow:external_dataset_py",
-        "@googleapis_for_longrunning//google/longrunning:longrunning_py_proto",
+        "@com_google_googleapis//google/longrunning:operations_py_proto",
+        "@pypi_absl_py//:pkg",
+        "@pypi_tensorflow//:pkg",
     ],
 )
 
@@ -305,8 +364,10 @@ py_library(
         ":http_actions",
         "//fcp/protos:population_eligibility_spec_py_pb2",
         "//fcp/protos/federatedcompute:federated_compute_py_pb2",
+        "@com_google_googleapis//google/longrunning:operations_py_proto",
         "@com_google_googleapis//google/rpc:code_py_proto",
-        "@googleapis_for_longrunning//google/longrunning:longrunning_py_proto",
+        "@com_google_protobuf//:protobuf_python",
+        "@pypi_absl_py//:pkg",
     ],
 )
 
@@ -322,6 +383,7 @@ py_test(
         "//fcp/protos:population_eligibility_spec_py_pb2",
         "//fcp/protos/federatedcompute:federated_compute_py_pb2",
         "@com_google_googleapis//google/rpc:code_py_proto",
+        "@pypi_absl_py//:pkg",
     ],
 )
 
@@ -329,6 +391,9 @@ py_library(
     name = "test_utils",
     testonly = True,
     srcs = ["test_utils.py"],
+    deps = [
+        "@pypi_tensorflow//:pkg",
+    ],
 )
 
 py_test(
@@ -337,5 +402,9 @@ py_test(
     srcs = ["test_utils_test.py"],
     python_version = "PY3",
     srcs_version = "PY3",
-    deps = [":test_utils"],
+    deps = [
+        ":test_utils",
+        "@pypi_absl_py//:pkg",
+        "@pypi_tensorflow//:pkg",
+    ],
 )

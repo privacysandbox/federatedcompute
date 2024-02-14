@@ -17,6 +17,8 @@
 
 #include <fcntl.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -27,6 +29,7 @@
 #include <variant>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/cord.h"
@@ -53,6 +56,7 @@
 #include "fcp/client/eligibility_decider.h"
 #include "fcp/client/engine/tflite_plan_engine.h"
 #include "fcp/client/event_publisher.h"
+#include "fcp/client/example_iterator_query_recorder.h"
 #include "fcp/client/federated_protocol.h"
 #include "fcp/client/federated_protocol_util.h"
 #include "fcp/client/files.h"
@@ -71,6 +75,7 @@
 #include "fcp/client/secagg_runner.h"
 #include "fcp/client/selector_context.pb.h"
 #include "fcp/client/simple_task_environment.h"
+#include "fcp/client/task_result_info.pb.h"
 #include "fcp/protos/federated_api.pb.h"
 #include "fcp/protos/opstats.pb.h"
 #include "fcp/protos/plan.pb.h"
@@ -135,7 +140,9 @@ struct PlanResultAndCheckpointFile {
   explicit PlanResultAndCheckpointFile(engine::PlanResult plan_result)
       : plan_result(std::move(plan_result)) {}
   engine::PlanResult plan_result;
-  std::string checkpoint_file;
+  // The name of the output checkpoint file. Empty if the plan did not produce
+  // an output checkpoint.
+  std::string checkpoint_filename;
 
   PlanResultAndCheckpointFile(PlanResultAndCheckpointFile&&) = default;
   PlanResultAndCheckpointFile& operator=(PlanResultAndCheckpointFile&&) =
@@ -153,7 +160,8 @@ absl::StatusOr<ComputationResults> CreateComputationResults(
     const TensorflowSpec* tensorflow_spec,
     const PlanResultAndCheckpointFile& plan_result_and_checkpoint_file,
     const Flags* flags) {
-  const auto& [plan_result, checkpoint_file] = plan_result_and_checkpoint_file;
+  const auto& [plan_result, checkpoint_filename] =
+      plan_result_and_checkpoint_file;
   if (plan_result.outcome != engine::PlanOutcome::kSuccess) {
     return absl::InvalidArgumentError("Computation failed.");
   }
@@ -220,9 +228,9 @@ absl::StatusOr<ComputationResults> CreateComputationResults(
   } else {
     // Name of the TF checkpoint inside the aggregand map in the Checkpoint
     // protobuf. This field name is ignored by the server.
-    if (!checkpoint_file.empty()) {
+    if (!checkpoint_filename.empty()) {
       FCP_ASSIGN_OR_RETURN(std::string tf_checkpoint,
-                           fcp::ReadFileToString(checkpoint_file));
+                           fcp::ReadFileToString(checkpoint_filename));
       computation_results[std::string(kTensorflowCheckpointAggregand)] =
           std::move(tf_checkpoint);
     }
@@ -256,6 +264,37 @@ std::unique_ptr<TfLiteInputs> ConstructTfLiteInputsForEligibilityEvalPlan(
   }
   return inputs;
 }
+
+// A helper class for running TensorFlowSpec Eligibility Eval Plans.
+class EetPlanRunnerImpl : public EetPlanRunner {
+ public:
+  explicit EetPlanRunnerImpl(
+      const std::function<engine::PlanResult(
+          std::vector<engine::ExampleIteratorFactory*>)>& run_plan_func,
+      const std::function<absl::StatusOr<TaskEligibilityInfo>(
+          std::vector<tensorflow::Tensor>)>& parse_output_func)
+      : run_plan_func_(run_plan_func), parse_output_func_(parse_output_func) {}
+
+  engine::PlanResult RunPlan(std::vector<engine::ExampleIteratorFactory*>
+                                 example_iterator_factories) override {
+    return run_plan_func_(example_iterator_factories);
+  }
+
+  absl::StatusOr<TaskEligibilityInfo> ParseOutput(
+      const std::vector<tensorflow::Tensor>& output_tensors) override {
+    return parse_output_func_(output_tensors);
+  }
+
+  ~EetPlanRunnerImpl() override = default;
+
+ private:
+  std::function<engine::PlanResult(
+      std::vector<engine::ExampleIteratorFactory*>)>
+      run_plan_func_;
+  std::function<absl::StatusOr<TaskEligibilityInfo>(
+      std::vector<tensorflow::Tensor>)>
+      parse_output_func_;
+};
 
 // Returns the cumulative network stats (those incurred up until this point in
 // time).
@@ -324,7 +363,7 @@ CreateSimpleTaskEnvironmentIteratorFactory(
                   example_selector) {
         if (should_log_collection_first_access_time &&
             flags->log_collection_first_access_time()) {
-          phase_logger->LogCollectionFirstAccessTime(
+          phase_logger->MaybeLogCollectionFirstAccessTime(
               example_selector.collection_uri());
         }
         return task_env->CreateExampleIterator(example_selector,
@@ -360,14 +399,13 @@ engine::PlanResult RunEligibilityEvalPlanWithTensorflowSpec(
     log_manager->LogDiag(
         ProdDiagCode::BACKGROUND_TRAINING_TFLITE_MODEL_INCLUDED);
   }
-
   if (flags->use_tflite_training() && tflite_model_included) {
     std::unique_ptr<TfLiteInputs> tflite_inputs =
         ConstructTfLiteInputsForEligibilityEvalPlan(io_router,
                                                     checkpoint_input_filename);
-    engine::TfLitePlanEngine plan_engine(example_iterator_factories,
-                                         should_abort, log_manager,
-                                         opstats_logger, flags, &timing_config);
+    engine::TfLitePlanEngine plan_engine(
+        example_iterator_factories, should_abort, log_manager, opstats_logger,
+        flags, /*example_iterator_query_recorder=*/nullptr, &timing_config);
     return plan_engine.RunPlan(client_plan.phase().tensorflow_spec(),
                                client_plan.tflite_graph(),
                                std::move(tflite_inputs), output_names);
@@ -379,9 +417,9 @@ engine::PlanResult RunEligibilityEvalPlanWithTensorflowSpec(
   auto inputs = ConstructInputsForEligibilityEvalPlan(
       io_router, checkpoint_input_filename);
   // Run plan and get a set of output tensors back.
-  engine::SimplePlanEngine plan_engine(example_iterator_factories, should_abort,
-                                       log_manager, opstats_logger,
-                                       &timing_config);
+  engine::SimplePlanEngine plan_engine(
+      example_iterator_factories, should_abort, log_manager, opstats_logger,
+      /*example_iterator_query_recorder=*/nullptr, &timing_config);
   return plan_engine.RunPlan(
       client_plan.phase().tensorflow_spec(), client_plan.graph(),
       client_plan.tensorflow_config_proto(), std::move(inputs), output_names);
@@ -493,6 +531,7 @@ PlanResultAndCheckpointFile RunPlanWithTensorflowSpec(
     std::vector<engine::ExampleIteratorFactory*> example_iterator_factories,
     std::function<bool()> should_abort, LogManager* log_manager,
     OpStatsLogger* opstats_logger, const Flags* flags,
+    ExampleIteratorQueryRecorder* example_iterator_query_recorder,
     const ClientOnlyPlan& client_plan,
     const std::string& checkpoint_input_filename,
     const std::string& checkpoint_output_filename,
@@ -529,14 +568,14 @@ PlanResultAndCheckpointFile RunPlanWithTensorflowSpec(
         ConstructTFLiteInputsForTensorflowSpecPlan(
             client_plan.phase().federated_compute(), checkpoint_input_filename,
             checkpoint_output_filename);
-    engine::TfLitePlanEngine plan_engine(example_iterator_factories,
-                                         should_abort, log_manager,
-                                         opstats_logger, flags, &timing_config);
+    engine::TfLitePlanEngine plan_engine(
+        example_iterator_factories, should_abort, log_manager, opstats_logger,
+        flags, example_iterator_query_recorder, &timing_config);
     engine::PlanResult plan_result = plan_engine.RunPlan(
         client_plan.phase().tensorflow_spec(), client_plan.tflite_graph(),
         std::move(tflite_inputs), *output_names);
     PlanResultAndCheckpointFile result(std::move(plan_result));
-    result.checkpoint_file = checkpoint_output_filename;
+    result.checkpoint_filename = checkpoint_output_filename;
 
     return result;
   }
@@ -548,15 +587,15 @@ PlanResultAndCheckpointFile RunPlanWithTensorflowSpec(
   auto inputs = ConstructInputsForTensorflowSpecPlan(
       client_plan.phase().federated_compute(), checkpoint_input_filename,
       checkpoint_output_filename);
-  engine::SimplePlanEngine plan_engine(example_iterator_factories, should_abort,
-                                       log_manager, opstats_logger,
-                                       &timing_config);
+  engine::SimplePlanEngine plan_engine(
+      example_iterator_factories, should_abort, log_manager, opstats_logger,
+      example_iterator_query_recorder, &timing_config);
   engine::PlanResult plan_result = plan_engine.RunPlan(
       client_plan.phase().tensorflow_spec(), client_plan.graph(),
       client_plan.tensorflow_config_proto(), std::move(inputs), *output_names);
 
   PlanResultAndCheckpointFile result(std::move(plan_result));
-  result.checkpoint_file = checkpoint_output_filename;
+  result.checkpoint_filename = checkpoint_output_filename;
 
   return result;
 #else
@@ -569,6 +608,7 @@ PlanResultAndCheckpointFile RunPlanWithTensorflowSpec(
 PlanResultAndCheckpointFile RunPlanWithExampleQuerySpec(
     std::vector<engine::ExampleIteratorFactory*> example_iterator_factories,
     OpStatsLogger* opstats_logger, const Flags* flags,
+    ExampleIteratorQueryRecorder* example_iterator_query_recorder,
     const ClientOnlyPlan& client_plan,
     const std::string& checkpoint_output_filename) {
   if (!client_plan.phase().has_example_query_spec()) {
@@ -606,11 +646,12 @@ PlanResultAndCheckpointFile RunPlanWithExampleQuerySpec(
   }
 
   engine::ExampleQueryPlanEngine plan_engine(example_iterator_factories,
-                                             opstats_logger, flags);
+                                             opstats_logger, flags,
+                                             example_iterator_query_recorder);
   engine::PlanResult plan_result = plan_engine.RunPlan(
       client_plan.phase().example_query_spec(), checkpoint_output_filename);
   PlanResultAndCheckpointFile result(std::move(plan_result));
-  result.checkpoint_file = checkpoint_output_filename;
+  result.checkpoint_filename = checkpoint_output_filename;
   return result;
 }
 
@@ -849,8 +890,11 @@ absl::StatusOr<std::string> CreateInputCheckpointFile(
 absl::StatusOr<std::optional<TaskEligibilityInfo>>
 MaybeComputeNativeEligibility(
     const FederatedProtocol::EligibilityEvalTask& eligibility_eval_task,
-    LogManager& log_manager, OpStatsLogger* opstats_logger, Clock& clock,
-    std::vector<engine::ExampleIteratorFactory*> example_iterator_factories) {
+    LogManager& log_manager, PhaseLogger& phase_logger,
+    OpStatsLogger* opstats_logger, Clock& clock,
+    std::vector<engine::ExampleIteratorFactory*> example_iterator_factories,
+    bool neet_tf_custom_policy_support, EetPlanRunner& eet_plan_runner,
+    const Flags* flags) {
   FCP_ASSIGN_OR_RETURN(opstats::OpStatsSequence opstats_sequence,
                        opstats_logger->GetOpStatsDb()->Read());
 
@@ -858,7 +902,9 @@ MaybeComputeNativeEligibility(
       TaskEligibilityInfo task_eligibility_info,
       ComputeEligibility(
           eligibility_eval_task.population_eligibility_spec.value(),
-          log_manager, opstats_sequence, clock, example_iterator_factories));
+          log_manager, phase_logger, opstats_sequence, clock,
+          example_iterator_factories, neet_tf_custom_policy_support,
+          eet_plan_runner, flags));
 
   if (task_eligibility_info.task_weights_size() == 0) {
     // Eligibility could not be decided.
@@ -920,12 +966,34 @@ absl::StatusOr<std::optional<TaskEligibilityInfo>> RunEligibilityEvalPlan(
   // to legacy eets.
   if (flags->enable_native_eets() &&
       eligibility_eval_task.population_eligibility_spec.has_value()) {
+    std::function<engine::PlanResult(
+        std::vector<engine::ExampleIteratorFactory*>)>
+        run_plan_func = [&should_abort, &log_manager, &opstats_logger, &flags,
+                         &plan, &checkpoint_input_filename, &timing_config,
+                         &run_computation_start_time, &reference_time](
+                            std::vector<engine::ExampleIteratorFactory*>
+                                override_iterator_factories) {
+          return RunEligibilityEvalPlanWithTensorflowSpec(
+              override_iterator_factories, should_abort, log_manager,
+              opstats_logger, flags, plan, *checkpoint_input_filename,
+              timing_config, run_computation_start_time, reference_time);
+        };
+
+    std::function<absl::StatusOr<TaskEligibilityInfo>(
+        std::vector<tensorflow::Tensor>)>
+        parse_output_func = [](std::vector<tensorflow::Tensor> output_tensors) {
+          return ParseEligibilityEvalPlanOutput(output_tensors);
+        };
+
+    EetPlanRunnerImpl eet_plan_runner(run_plan_func, parse_output_func);
+
     // TODO(team): Return ExampleStats out of the NEET engine so they can
     // be measured.
     absl::StatusOr<std::optional<TaskEligibilityInfo>>
         native_task_eligibility_info = MaybeComputeNativeEligibility(
-            eligibility_eval_task, *log_manager, opstats_logger, clock,
-            example_iterator_factories);
+            eligibility_eval_task, *log_manager, phase_logger, opstats_logger,
+            clock, example_iterator_factories,
+            flags->neet_tf_custom_policy_support(), eet_plan_runner, flags);
 
     // If native_task_eligibility_info has an OK status, and the wrapped
     // optional contains a value, OR if we have a not-OK status, we should log
@@ -960,6 +1028,7 @@ absl::StatusOr<std::optional<TaskEligibilityInfo>> RunEligibilityEvalPlan(
 struct EligibilityEvalResult {
   std::optional<TaskEligibilityInfo> task_eligibility_info;
   std::vector<std::string> task_names_for_multiple_task_assignments;
+  bool population_supports_single_task_assignment = false;
 };
 
 // Create an EligibilityEvalResult from a TaskEligibilityInfo and
@@ -969,24 +1038,44 @@ struct EligibilityEvalResult {
 // and a vector of task names for multiple task assignment.
 EligibilityEvalResult CreateEligibilityEvalResult(
     const std::optional<TaskEligibilityInfo>& task_eligibility_info,
-    const std::optional<PopulationEligibilitySpec>& population_spec) {
+    const std::optional<PopulationEligibilitySpec>& population_spec,
+    bool task_assignment_mode_treat_unspecified_as_single) {
   EligibilityEvalResult result;
-  if (population_spec.has_value() && task_eligibility_info.has_value()) {
-    absl::flat_hash_set<std::string> task_names_for_multiple_task_assignments;
+  std::vector<std::string> task_names_for_multiple_task_assignments;
+  if (population_spec.has_value()) {
     for (const auto& task_info : population_spec.value().task_info()) {
       if (task_info.task_assignment_mode() ==
           PopulationEligibilitySpec::TaskInfo::TASK_ASSIGNMENT_MODE_MULTIPLE) {
-        task_names_for_multiple_task_assignments.insert(task_info.task_name());
+        task_names_for_multiple_task_assignments.push_back(
+            task_info.task_name());
+      } else if (task_info.task_assignment_mode() ==
+                     PopulationEligibilitySpec::TaskInfo::
+                         TASK_ASSIGNMENT_MODE_SINGLE ||
+                 (task_assignment_mode_treat_unspecified_as_single &&
+                  task_info.task_assignment_mode() ==
+                      PopulationEligibilitySpec::TaskInfo::
+                          TASK_ASSIGNMENT_MODE_UNSPECIFIED)) {
+        result.population_supports_single_task_assignment = true;
       }
     }
+  } else {
+    // If the server didn't return a PopulationEligibilitySpec, single task
+    // assignment is enabled by default.
+    result.population_supports_single_task_assignment = true;
+  }
+
+  if (task_eligibility_info.has_value()) {
     TaskEligibilityInfo single_task_assignment_eligibility_info;
     single_task_assignment_eligibility_info.set_version(
         task_eligibility_info.value().version());
     for (const auto& task_weight :
          task_eligibility_info.value().task_weights()) {
       const std::string& task_name = task_weight.task_name();
-      if (task_names_for_multiple_task_assignments.contains(task_name) &&
-          task_weight.weight() > 0) {
+      if (task_weight.weight() > 0 &&
+          std::find(task_names_for_multiple_task_assignments.begin(),
+                    task_names_for_multiple_task_assignments.end(),
+                    task_name) !=
+              task_names_for_multiple_task_assignments.end()) {
         result.task_names_for_multiple_task_assignments.push_back(task_name);
       } else {
         *single_task_assignment_eligibility_info.mutable_task_weights()->Add() =
@@ -996,6 +1085,8 @@ EligibilityEvalResult CreateEligibilityEvalResult(
     result.task_eligibility_info = single_task_assignment_eligibility_info;
   } else {
     result.task_eligibility_info = task_eligibility_info;
+    result.task_names_for_multiple_task_assignments =
+        std::move(task_names_for_multiple_task_assignments);
   }
   return result;
 }
@@ -1145,23 +1236,14 @@ absl::StatusOr<EligibilityEvalResult> IssueEligibilityEvalCheckinAndRunPlan(
     // the population then there is nothing more to do. We simply proceed to
     // the "checkin" phase below without providing it a TaskEligibilityInfo
     // proto.
-    result.task_eligibility_info = std::nullopt;
     auto eligibility_eval_disabled =
         std::get<FederatedProtocol::EligibilityEvalDisabled>(
             *eligibility_checkin_result);
-    if (eligibility_eval_disabled.population_eligibility_spec.has_value()) {
-      for (const auto& task_info :
-           eligibility_eval_disabled.population_eligibility_spec.value()
-               .task_info()) {
-        if (task_info.task_assignment_mode() ==
-            PopulationEligibilitySpec::TaskInfo::
-                TASK_ASSIGNMENT_MODE_MULTIPLE) {
-          result.task_names_for_multiple_task_assignments.push_back(
-              task_info.task_name());
-        }
-      }
-    }
-    return result;
+    return CreateEligibilityEvalResult(
+        /*task_eligibility_info=*/std::nullopt,
+        eligibility_eval_disabled.population_eligibility_spec,
+        /* task_assignment_mode_treat_unspecified_as_single=*/
+        flags->task_assignment_mode_treat_unspecified_as_single());
   }
 
   auto eligibility_eval_task = std::get<FederatedProtocol::EligibilityEvalTask>(
@@ -1195,8 +1277,9 @@ absl::StatusOr<EligibilityEvalResult> IssueEligibilityEvalCheckinAndRunPlan(
     return task_eligibility_info.status();
   }
   return CreateEligibilityEvalResult(
-      *task_eligibility_info,
-      eligibility_eval_task.population_eligibility_spec);
+      *task_eligibility_info, eligibility_eval_task.population_eligibility_spec,
+      /* task_assignment_mode_treat_unspecified_as_single=*/
+      flags->task_assignment_mode_treat_unspecified_as_single());
 }
 
 struct CheckinResult {
@@ -1413,16 +1496,118 @@ absl::StatusOr<CheckinResult> IssueCheckin(
   absl::StatusOr<CheckinResult> result = CreateCheckinResultFromTaskAssignment(
       task_assignment, files, log_invalid_payload_error, log_io_error, flags);
   if (result.ok()) {
+    // Only log the current index of the MinimumSeparationPolicy if the flag
+    // `enable_minimum_separation_policy` is true and the `min_sep_policy_index`
+    // is present in the `client_persisted_data`.
+    std::optional<int64_t> min_sep_policy_index = std::nullopt;
+    if (flags->enable_minimum_separation_policy() &&
+        result.value().plan.has_client_persisted_data() &&
+        result.value()
+            .plan.client_persisted_data()
+            .has_min_sep_policy_index()) {
+      min_sep_policy_index =
+          result.value().plan.client_persisted_data().min_sep_policy_index();
+    }
     phase_logger.LogCheckinCompleted(
         result->task_name,
         GetNetworkStatsSince(federated_protocol,
                              /*fedselect_manager=*/nullptr,
                              network_stats_before_plan_download),
         /*time_before_checkin=*/time_before_checkin,
-        /*time_before_plan_download=*/time_before_plan_download,
-        reference_time);
+        /*time_before_plan_download=*/time_before_plan_download, reference_time,
+        min_sep_policy_index);
   }
   return result;
+}
+
+SelectorContext FillSelectorContextWithTaskLevelDetails(
+    const absl::StatusOr<CheckinResult>& checkin_result,
+    const SelectorContext& federated_selector_context,
+    OpStatsLogger* opstats_logger, const Flags* flags) {
+  SelectorContext federated_selector_context_with_task_name =
+      federated_selector_context;
+  federated_selector_context_with_task_name.mutable_computation_properties()
+      ->mutable_federated()
+      ->set_task_name(checkin_result->task_name);
+  if (flags->enable_computation_id()) {
+    federated_selector_context_with_task_name.mutable_computation_properties()
+        ->mutable_federated()
+        ->set_computation_id(checkin_result->computation_id);
+  }
+  if (checkin_result->plan.phase().has_example_query_spec()) {
+    federated_selector_context_with_task_name.mutable_computation_properties()
+        ->set_example_iterator_output_format(
+            ::fcp::client::QueryTimeComputationProperties::
+                EXAMPLE_QUERY_RESULT);
+  }
+
+  // Include the last successful contribution timestamp in the SelectorContext.
+  const auto& opstats_db = opstats_logger->GetOpStatsDb();
+  if (opstats_db != nullptr) {
+    absl::StatusOr<opstats::OpStatsSequence> data = opstats_db->Read();
+    if (data.ok()) {
+      std::optional<google::protobuf::Timestamp>
+          last_successful_contribution_time =
+              opstats::GetLastSuccessfulContributionTime(
+                  *data, checkin_result->task_name);
+      if (last_successful_contribution_time.has_value()) {
+        *(federated_selector_context_with_task_name
+              .mutable_computation_properties()
+              ->mutable_federated()
+              ->mutable_historical_context()
+              ->mutable_last_successful_contribution_time()) =
+            *last_successful_contribution_time;
+      }
+      std::optional<
+          absl::flat_hash_map<std::string, google::protobuf::Timestamp>>
+          collection_first_access_times =
+              opstats::GetPreviousCollectionFirstAccessTimeMap(
+                  *data, checkin_result->task_name);
+      if (collection_first_access_times.has_value()) {
+        federated_selector_context_with_task_name
+            .mutable_computation_properties()
+            ->mutable_federated()
+            ->mutable_historical_context()
+            ->mutable_collection_first_access_times()
+            ->insert(collection_first_access_times->begin(),
+                     collection_first_access_times->end());
+      }
+    }
+  }
+
+  if (checkin_result->plan.phase().has_example_query_spec()) {
+    // Example query plan only supports simple agg for now.
+    *(federated_selector_context_with_task_name
+          .mutable_computation_properties()
+          ->mutable_federated()
+          ->mutable_simple_aggregation()) = SimpleAggregation();
+  } else {
+    const auto& federated_compute_io_router =
+        checkin_result->plan.phase().federated_compute();
+    const bool has_simpleagg_tensors =
+        !federated_compute_io_router.output_filepath_tensor_name().empty();
+    bool all_aggregations_are_secagg = true;
+    for (const auto& aggregation : federated_compute_io_router.aggregations()) {
+      all_aggregations_are_secagg &=
+          aggregation.second.protocol_config_case() ==
+          AggregationConfig::kSecureAggregation;
+    }
+    if (!has_simpleagg_tensors && all_aggregations_are_secagg) {
+      federated_selector_context_with_task_name
+          .mutable_computation_properties()
+          ->mutable_federated()
+          ->mutable_secure_aggregation()
+          ->set_minimum_clients_in_server_visible_aggregate(
+              checkin_result->minimum_clients_in_server_visible_aggregate);
+    } else {
+      // Has an output checkpoint, so some tensors must be simply aggregated.
+      *(federated_selector_context_with_task_name
+            .mutable_computation_properties()
+            ->mutable_federated()
+            ->mutable_simple_aggregation()) = SimpleAggregation();
+    }
+  }
+  return federated_selector_context_with_task_name;
 }
 
 // Issues a multiple task assignment request and tries to fetch payloads for all
@@ -1617,106 +1802,58 @@ struct RunPlanResults {
 
 RunPlanResults RunComputation(
     const absl::StatusOr<CheckinResult>& checkin_result,
-    const SelectorContext& federated_selector_context,
+    const SelectorContext& selector_context_with_task_details,
     SimpleTaskEnvironment* env_deps, PhaseLogger& phase_logger, Files* files,
     LogManager* log_manager, OpStatsLogger* opstats_logger, const Flags* flags,
     FederatedProtocol* federated_protocol,
     FederatedSelectManager* fedselect_manager,
     engine::ExampleIteratorFactory* opstats_example_iterator_factory,
+    ExampleIteratorQueryRecorder* example_iterator_query_recorder,
     FLRunnerResult& fl_runner_result, const std::function<bool()>& should_abort,
     const fcp::client::InterruptibleRunner::TimingConfig& timing_config,
     const absl::Time reference_time) {
-  SelectorContext federated_selector_context_with_task_name =
-      federated_selector_context;
-  federated_selector_context_with_task_name.mutable_computation_properties()
-      ->mutable_federated()
-      ->set_task_name(checkin_result->task_name);
-  if (flags->enable_computation_id()) {
-    federated_selector_context_with_task_name.mutable_computation_properties()
-        ->mutable_federated()
-        ->set_computation_id(checkin_result->computation_id);
-  }
-  if (checkin_result->plan.phase().has_example_query_spec()) {
-    federated_selector_context_with_task_name.mutable_computation_properties()
-        ->set_example_iterator_output_format(
-            ::fcp::client::QueryTimeComputationProperties::
-                EXAMPLE_QUERY_RESULT);
-  }
-
-  // Include the last successful contribution timestamp in the SelectorContext.
-  const auto& opstats_db = opstats_logger->GetOpStatsDb();
-  if (opstats_db != nullptr) {
-    absl::StatusOr<opstats::OpStatsSequence> data = opstats_db->Read();
-    if (data.ok()) {
-      std::optional<google::protobuf::Timestamp>
-          last_successful_contribution_time =
-              opstats::GetLastSuccessfulContributionTime(
-                  *data, checkin_result->task_name);
-      if (last_successful_contribution_time.has_value()) {
-        *(federated_selector_context_with_task_name
-              .mutable_computation_properties()
-              ->mutable_federated()
-              ->mutable_historical_context()
-              ->mutable_last_successful_contribution_time()) =
-            *last_successful_contribution_time;
-      }
-    }
-  }
-
-  if (checkin_result->plan.phase().has_example_query_spec()) {
-    // Example query plan only supports simple agg for now.
-    *(federated_selector_context_with_task_name
-          .mutable_computation_properties()
-          ->mutable_federated()
-          ->mutable_simple_aggregation()) = SimpleAggregation();
-  } else {
-    const auto& federated_compute_io_router =
-        checkin_result->plan.phase().federated_compute();
-    const bool has_simpleagg_tensors =
-        !federated_compute_io_router.output_filepath_tensor_name().empty();
-    bool all_aggregations_are_secagg = true;
-    for (const auto& aggregation : federated_compute_io_router.aggregations()) {
-      all_aggregations_are_secagg &=
-          aggregation.second.protocol_config_case() ==
-          AggregationConfig::kSecureAggregation;
-    }
-    if (!has_simpleagg_tensors && all_aggregations_are_secagg) {
-      federated_selector_context_with_task_name
-          .mutable_computation_properties()
-          ->mutable_federated()
-          ->mutable_secure_aggregation()
-          ->set_minimum_clients_in_server_visible_aggregate(
-              checkin_result->minimum_clients_in_server_visible_aggregate);
-    } else {
-      // Has an output checkpoint, so some tensors must be simply aggregated.
-      *(federated_selector_context_with_task_name
-            .mutable_computation_properties()
-            ->mutable_federated()
-            ->mutable_simple_aggregation()) = SimpleAggregation();
-    }
-  }
-
   RetryWindow report_retry_window;
   phase_logger.LogComputationStarted(checkin_result->task_name);
   absl::Time run_plan_start_time = absl::Now();
   NetworkStats run_plan_start_network_stats =
       GetCumulativeNetworkStats(federated_protocol, fedselect_manager);
-  absl::StatusOr<std::string> checkpoint_output_filename =
-      files->CreateTempFile("output", ".ckp");
-  if (!checkpoint_output_filename.ok()) {
-    auto status = checkpoint_output_filename.status();
-    auto message = absl::StrCat(
-        "Could not create temporary output checkpoint file: code: ",
-        status.code(), ", message: ", status.message());
-    phase_logger.LogComputationIOError(
-        status, ExampleStats(),
-        GetNetworkStatsSince(federated_protocol, fedselect_manager,
-                             run_plan_start_network_stats),
-        run_plan_start_time);
-    return RunPlanResults{
-        .outcome = engine::PlanOutcome::kInvalidArgument,
-        .computation_results = absl::Status(status.code(), message),
-        .run_plan_start_time = run_plan_start_time};
+
+  std::string checkpoint_output_filename;
+  bool task_requires_output_checkpoint = true;
+  if (flags->skip_empty_output_checkpoints()) {
+    // A task does not require an output checkpoint if it is a lightweight task
+    // and the new client report format is enabled, or if all of the outputs are
+    // aggregated with secagg.
+    if (flags->enable_lightweight_client_report_wire_format() &&
+        checkin_result->plan.phase().has_example_query_spec()) {
+      task_requires_output_checkpoint = false;
+    } else if (checkin_result->plan.phase().has_federated_compute() &&
+               checkin_result->plan.phase()
+                   .federated_compute()
+                   .output_filepath_tensor_name()
+                   .empty()) {
+      task_requires_output_checkpoint = false;
+    }
+  }
+  if (task_requires_output_checkpoint) {
+    absl::StatusOr<std::string> output_filename =
+        files->CreateTempFile("output", ".ckp");
+    if (!output_filename.ok()) {
+      auto status = output_filename.status();
+      auto message = absl::StrCat(
+          "Could not create temporary output checkpoint file: code: ",
+          status.code(), ", message: ", status.message());
+      phase_logger.LogComputationIOError(
+          status, ExampleStats(),
+          GetNetworkStatsSince(federated_protocol, fedselect_manager,
+                               run_plan_start_network_stats),
+          run_plan_start_time);
+      return RunPlanResults{
+          .outcome = engine::PlanOutcome::kInvalidArgument,
+          .computation_results = absl::Status(status.code(), message),
+          .run_plan_start_time = run_plan_start_time};
+    }
+    checkpoint_output_filename = *output_filename;
   }
 
   // Regular plans can use example iterators from the SimpleTaskEnvironment,
@@ -1726,8 +1863,8 @@ RunPlanResults RunComputation(
   // sampling without replacement for the environment.
   std::unique_ptr<engine::ExampleIteratorFactory> env_example_iterator_factory =
       CreateSimpleTaskEnvironmentIteratorFactory(
-          env_deps, federated_selector_context_with_task_name, &phase_logger,
-          flags, /*should_log_collection_first_access_time=*/true);
+          env_deps, selector_context_with_task_details, &phase_logger, flags,
+          /*should_log_collection_first_access_time=*/true);
   std::unique_ptr<::fcp::client::engine::ExampleIteratorFactory>
       fedselect_example_iterator_factory =
           fedselect_manager->CreateExampleIteratorFactoryForUriTemplate(
@@ -1740,12 +1877,13 @@ RunPlanResults RunComputation(
       checkin_result->plan.phase().has_example_query_spec()
           ? RunPlanWithExampleQuerySpec(
                 example_iterator_factories, opstats_logger, flags,
-                checkin_result->plan, *checkpoint_output_filename)
+                example_iterator_query_recorder, checkin_result->plan,
+                checkpoint_output_filename)
           : RunPlanWithTensorflowSpec(
                 example_iterator_factories, should_abort, log_manager,
-                opstats_logger, flags, checkin_result->plan,
-                checkin_result->checkpoint_input_filename,
-                *checkpoint_output_filename, timing_config);
+                opstats_logger, flags, example_iterator_query_recorder,
+                checkin_result->plan, checkin_result->checkpoint_input_filename,
+                checkpoint_output_filename, timing_config);
   // Update the FLRunnerResult fields to account for any network usage during
   // the execution of the plan (e.g. due to Federated Select slices having been
   // fetched).
@@ -1787,21 +1925,44 @@ std::vector<std::string> HandleMultipleTaskAssignments(
   // steps fails for one of the tasks
   for (const auto& task_assignment : multiple_task_assignments) {
     phase_logger.SetModelIdentifier(task_assignment.task_name);
+    SelectorContext selector_context_with_task_details =
+        FillSelectorContextWithTaskLevelDetails(
+            task_assignment, federated_selector_context, opstats_logger, flags);
+    std::unique_ptr<ExampleIteratorQueryRecorder>
+        example_iterator_query_recorder = nullptr;
+    if (flags->enable_native_example_query_recording()) {
+      example_iterator_query_recorder =
+          std::make_unique<ExampleIteratorQueryRecorderImpl>(
+              selector_context_with_task_details);
+    }
     RunPlanResults run_plan_results = RunComputation(
-        task_assignment, federated_selector_context, env_deps, phase_logger,
-        files, log_manager, opstats_logger, flags, federated_protocol,
-        fedselect_manager, opstats_example_iterator_factory, fl_runner_result,
-        should_abort, timing_config, reference_time);
+        task_assignment, selector_context_with_task_details, env_deps,
+        phase_logger, files, log_manager, opstats_logger, flags,
+        federated_protocol, fedselect_manager, opstats_example_iterator_factory,
+        example_iterator_query_recorder.get(), fl_runner_result, should_abort,
+        timing_config, reference_time);
     absl::Status report_result =
         ReportPlanResult(federated_protocol, phase_logger,
                          std::move(run_plan_results.computation_results),
                          run_plan_results.run_plan_start_time, reference_time,
                          task_assignment.aggregation_session_id);
+    TaskResultInfo task_result_info;
     if (run_plan_results.outcome == engine::PlanOutcome::kSuccess &&
         report_result.ok()) {
       // Only if training succeeded *and* reporting succeeded do we consider
       // the device to have contributed successfully.
       successful_task_names.push_back(task_assignment.task_name);
+      task_result_info.set_result(true);
+    } else {
+      task_result_info.set_result(false);
+    }
+    if (flags->enable_task_completion_callback()) {
+      if (flags->enable_native_example_query_recording() &&
+          example_iterator_query_recorder) {
+        *task_result_info.mutable_example_iterator_queries() =
+            example_iterator_query_recorder->StopRecordingAndGetQueries();
+      }
+      env_deps->OnTaskCompleted(std::move(task_result_info));
     }
   }
   return successful_task_names;
@@ -1990,7 +2151,7 @@ absl::StatusOr<FLRunnerResult> RunFederatedComputation(
   // Eligibility eval plans can use example iterators from the
   // SimpleTaskEnvironment and those reading the OpStats DB.
   opstats::OpStatsExampleIteratorFactory opstats_example_iterator_factory(
-      opstats_logger, log_manager);
+      opstats_logger, log_manager, flags->neet_tf_custom_policy_support());
   // This iterator factory is used by the task to query the environment's
   // example store for eligibility, and thus does not log first access time
   // since we do not implement example-level SWOR for eligibility.
@@ -2038,33 +2199,61 @@ absl::StatusOr<FLRunnerResult> RunFederatedComputation(
         timing_config, reference_time);
   }
 
-  // Run single task assignment.
+  if (!flags->check_eligibility_population_spec_before_checkin() ||
+      eligibility_eval_result->population_supports_single_task_assignment) {
+    // Run single task assignment.
 
-  // We increment expected_num_tasks because we expect the server to assign a
-  // task.
-  expected_num_tasks++;
+    // We increment expected_num_tasks because we expect the server to assign a
+    // task.
+    expected_num_tasks++;
+    auto checkin_result =
+        IssueCheckin(phase_logger, log_manager, files, federated_protocol,
+                     std::move(eligibility_eval_result->task_eligibility_info),
+                     reference_time, population_name, fl_runner_result, flags);
 
-  auto checkin_result =
-      IssueCheckin(phase_logger, log_manager, files, federated_protocol,
-                   std::move(eligibility_eval_result->task_eligibility_info),
-                   reference_time, population_name, fl_runner_result, flags);
+    if (checkin_result.ok()) {
+      SelectorContext selector_context_with_task_details =
+          FillSelectorContextWithTaskLevelDetails(checkin_result,
+                                                  federated_selector_context,
+                                                  opstats_logger, flags);
+      std::unique_ptr<ExampleIteratorQueryRecorder>
+          example_iterator_query_recorder = nullptr;
+      if (flags->enable_native_example_query_recording()) {
+        example_iterator_query_recorder =
+            std::make_unique<ExampleIteratorQueryRecorderImpl>(
+                selector_context_with_task_details);
+      }
 
-  if (checkin_result.ok()) {
-    auto run_plan_results = RunComputation(
-        checkin_result, federated_selector_context, env_deps, phase_logger,
-        files, log_manager, opstats_logger, flags, federated_protocol,
-        fedselect_manager, &opstats_example_iterator_factory, fl_runner_result,
-        should_abort, timing_config, reference_time);
+      auto run_plan_results = RunComputation(
+          checkin_result, selector_context_with_task_details, env_deps,
+          phase_logger, files, log_manager, opstats_logger, flags,
+          federated_protocol, fedselect_manager,
+          &opstats_example_iterator_factory,
+          example_iterator_query_recorder.get(), fl_runner_result, should_abort,
+          timing_config, reference_time);
 
-    absl::Status report_result = ReportPlanResult(
-        federated_protocol, phase_logger,
-        std::move(run_plan_results.computation_results),
-        run_plan_results.run_plan_start_time, reference_time, std::nullopt);
-    if (run_plan_results.outcome == engine::PlanOutcome::kSuccess &&
-        report_result.ok()) {
-      // Only if training succeeded *and* reporting succeeded do we consider
-      // the device to have contributed successfully.
-      successful_task_names.push_back(checkin_result->task_name);
+      absl::Status report_result = ReportPlanResult(
+          federated_protocol, phase_logger,
+          std::move(run_plan_results.computation_results),
+          run_plan_results.run_plan_start_time, reference_time, std::nullopt);
+      TaskResultInfo task_result_info;
+      if (run_plan_results.outcome == engine::PlanOutcome::kSuccess &&
+          report_result.ok()) {
+        // Only if training succeeded *and* reporting succeeded do we consider
+        // the device to have contributed successfully.
+        successful_task_names.push_back(checkin_result->task_name);
+        task_result_info.set_result(true);
+      } else {
+        task_result_info.set_result(false);
+      }
+      if (flags->enable_task_completion_callback()) {
+        if (flags->enable_native_example_query_recording() &&
+            example_iterator_query_recorder) {
+          *task_result_info.mutable_example_iterator_queries() =
+              example_iterator_query_recorder->StopRecordingAndGetQueries();
+        }
+        env_deps->OnTaskCompleted(std::move(task_result_info));
+      }
     }
   }
 
@@ -2116,7 +2305,8 @@ FLRunnerTensorflowSpecResult RunPlanWithTensorflowSpecForTesting(
   // Eligibility eval plans can only use iterators from the
   // SimpleTaskEnvironment and those reading the OpStats DB.
   opstats::OpStatsExampleIteratorFactory opstats_example_iterator_factory(
-      opstats_logger.get(), log_manager);
+      opstats_logger.get(), log_manager,
+      flags->neet_tf_custom_policy_support());
   std::unique_ptr<engine::ExampleIteratorFactory> env_example_iterator_factory =
       CreateSimpleTaskEnvironmentIteratorFactory(env_deps, SelectorContext(),
                                                  &phase_logger, flags, true);
@@ -2139,10 +2329,11 @@ FLRunnerTensorflowSpecResult RunPlanWithTensorflowSpecForTesting(
     PlanResultAndCheckpointFile plan_result_and_checkpoint_file =
         RunPlanWithTensorflowSpec(example_iterator_factories, should_abort,
                                   log_manager, opstats_logger.get(), flags,
+                                  /*example_iterator_query_recorder=*/nullptr,
                                   client_plan, checkpoint_input_filename,
                                   *checkpoint_output_filename, timing_config);
     result.set_checkpoint_output_filename(
-        plan_result_and_checkpoint_file.checkpoint_file);
+        plan_result_and_checkpoint_file.checkpoint_filename);
     plan_result = std::move(plan_result_and_checkpoint_file.plan_result);
   } else if (client_plan.phase().has_federated_compute_eligibility()) {
     // Eligibility eval plans.

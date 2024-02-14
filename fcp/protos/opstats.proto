@@ -422,7 +422,15 @@ message OperationalStats {
 
   repeated PhaseStats phase_stats = 13;
 
-  reserved 8, 9;
+  // The current index of MinimumSeparationPolicy that applied to this
+  // computation execution.
+  // The MinimumSeparationPolicy now is only used for enabling round-based
+  // sampling-without-replacement. The index (i.e., the round number) should be
+  // the same no matter what the value of the minimum separation is. So use a
+  // single value to record the index.
+  optional int64 min_sep_policy_index = 15;
+
+  reserved 8, 9, 14;
 }
 
 // Top level op stats message.

@@ -36,12 +36,12 @@
 #include "fcp/client/converters.h"
 #include "fcp/client/engine/common.h"
 #include "fcp/client/engine/plan_engine_helpers.h"
+#include "fcp/client/example_iterator_query_recorder.h"
 #include "fcp/client/example_query_result.pb.h"
 #include "fcp/client/flags.h"
 #include "fcp/client/opstats/opstats_logger.h"
 #include "fcp/client/simple_task_environment.h"
 #include "fcp/protos/plan.pb.h"
-#include "fcp/tensorflow/status.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_slice.h"
 #include "tensorflow/core/platform/tstring.h"
@@ -72,8 +72,7 @@ absl::Status WriteSlice(tf::checkpoint::TensorSliceWriter& slice_writer,
   tf::TensorShape shape;
   shape.AddDim(size);
   tf::TensorSlice slice(shape.dims());
-  tf::Status tf_status = slice_writer.Add(name, shape, slice, data);
-  return ConvertFromTensorFlowStatus(tf_status);
+  return slice_writer.Add(name, shape, slice, data);
 }
 
 // Returns a map of (vector name) -> tuple(output name, vector spec).
@@ -187,7 +186,7 @@ absl::Status WriteCheckpoint(
       }
     }
   }
-  return ConvertFromTensorFlowStatus(slice_writer.Finish());
+  return slice_writer.Finish();
 }
 
 // Converts example query results to client report wire format tensors. Example
@@ -273,10 +272,12 @@ absl::Status GenerateAggregationTensors(
 
 ExampleQueryPlanEngine::ExampleQueryPlanEngine(
     std::vector<ExampleIteratorFactory*> example_iterator_factories,
-    OpStatsLogger* opstats_logger, const Flags* flags)
+    OpStatsLogger* opstats_logger, const Flags* flags,
+    ExampleIteratorQueryRecorder* example_iterator_query_recorder)
     : example_iterator_factories_(example_iterator_factories),
       opstats_logger_(opstats_logger),
-      flags_(*flags) {}
+      flags_(*flags),
+      example_iterator_query_recorder_(example_iterator_query_recorder) {}
 
 PlanResult ExampleQueryPlanEngine::RunPlan(
     const ExampleQuerySpec& example_query_spec,
@@ -300,14 +301,19 @@ PlanResult ExampleQueryPlanEngine::RunPlan(
       return PlanResult(PlanOutcome::kExampleIteratorError,
                         example_iterator.status());
     }
+    SingleExampleIteratorQueryRecorder* single_query_recorder = nullptr;
+    if (example_iterator_query_recorder_) {
+      single_query_recorder =
+          example_iterator_query_recorder_->RecordQuery(selector);
+    }
 
     ExampleIteratorStatus example_iterator_status;
 
     std::atomic<int> unused_example_count = 0;
     auto dataset_iterator = std::make_unique<DatasetIterator>(
-        std::move(*example_iterator), opstats_logger_, &unused_example_count,
-        &total_example_size_bytes, &example_iterator_status,
-        selector.collection_uri(),
+        std::move(*example_iterator), opstats_logger_, single_query_recorder,
+        &unused_example_count, &total_example_size_bytes,
+        &example_iterator_status, selector.collection_uri(),
         /*collect_stats=*/example_iterator_factory->ShouldCollectStats());
 
     absl::StatusOr<std::string> example_query_result_str =

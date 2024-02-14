@@ -20,14 +20,14 @@
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "fcp/client/engine/common.h"
 #include "fcp/client/engine/example_iterator_factory.h"
-#include "fcp/client/event_publisher.h"
+#include "fcp/client/example_iterator_query_recorder.h"
 #include "fcp/client/flags.h"
 #include "fcp/client/interruptible_runner.h"
 #include "fcp/client/log_manager.h"
 #include "fcp/client/opstats/opstats_logger.h"
-#include "fcp/client/simple_task_environment.h"
 
 namespace fcp {
 namespace client {
@@ -45,12 +45,14 @@ class TfLitePlanEngine {
       std::vector<ExampleIteratorFactory*> example_iterator_factories,
       std::function<bool()> should_abort, LogManager* log_manager,
       ::fcp::client::opstats::OpStatsLogger* opstats_logger, const Flags* flags,
+      ExampleIteratorQueryRecorder* example_iterator_query_recorder,
       const InterruptibleRunner::TimingConfig* timing_config)
       : example_iterator_factories_(example_iterator_factories),
         should_abort_(should_abort),
         log_manager_(log_manager),
         opstats_logger_(opstats_logger),
         flags_(*flags),
+        example_iterator_query_recorder_(example_iterator_query_recorder),
         timing_config_(timing_config) {}
 
   // Runs the plan, and takes care of logging TfLite errors and external
@@ -70,6 +72,7 @@ class TfLitePlanEngine {
   LogManager* log_manager_;
   ::fcp::client::opstats::OpStatsLogger* opstats_logger_;
   const Flags& flags_;
+  ExampleIteratorQueryRecorder* example_iterator_query_recorder_;
   const InterruptibleRunner::TimingConfig* timing_config_;
 };
 

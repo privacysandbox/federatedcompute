@@ -16,6 +16,7 @@
 
 #include "fcp/aggregation/core/tensor.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -24,14 +25,12 @@
 #include <vector>
 
 #include "fcp/aggregation/core/datatype.h"
+#include "fcp/aggregation/core/tensor.pb.h"
+#include "fcp/aggregation/core/tensor_data.h"
 #include "fcp/aggregation/core/tensor_shape.h"
 #include "fcp/base/monitoring.h"
-
-#ifndef FCP_NANOLIBC
-#include "fcp/aggregation/core/tensor.pb.h"
 #include "google/protobuf/io/coded_stream.h"
 #include "google/protobuf/io/zero_copy_stream_impl_lite.h"
-#endif
 
 namespace fcp {
 namespace aggregation {
@@ -68,8 +67,6 @@ StatusOr<Tensor> Tensor::Create(DataType dtype, TensorShape shape,
   FCP_RETURN_IF_ERROR(tensor.CheckValid());
   return std::move(tensor);
 }
-
-#ifndef FCP_NANOLIBC
 
 // SerializedContentNumericData implements TensorData by wrapping the serialized
 // content string and using it directly as a backing storage. This relies on the
@@ -119,6 +116,33 @@ std::string EncodeContent<string_view>(const TensorData* data, size_t num) {
   }
 
   return content;
+}
+
+template <typename T>
+bool IsAligned(const void* data) {
+  return TensorData::IsAligned(data, alignof(T));
+}
+
+template <>
+bool IsAligned<string_view>(const void* data) {
+  // Alignment of data in a string tensor isn't required.
+  return true;
+}
+
+// This function creates a string with a buffer large enough to avoid
+// small size optimization (SSO). That is necessary to avoid passing the
+// unaligned data pointer to SerializedContentNumericData.
+std::string AlignedCopyOf(const std::string& content) {
+  std::string copy_of_content;
+  copy_of_content.reserve(std::max(static_cast<size_t>(32), content.size()));
+  copy_of_content.append(content);
+  return copy_of_content;
+}
+
+template <typename T>
+inline std::string MakeAligned(std::string&& content) {
+  return IsAligned<T>(content.data()) ? std::move(content)
+                                      : AlignedCopyOf(content);
 }
 
 // Converts the serialized TensorData content stored in TensorProto to an
@@ -215,17 +239,83 @@ StatusOr<std::unique_ptr<TensorData>> DecodeContent<string_view>(
   return tensor_data;
 }
 
+template <typename T>
+class VectorNumericData : public TensorData {
+ public:
+  explicit VectorNumericData(std::vector<T> values)
+      : values_(std::move(values)) {}
+  ~VectorNumericData() override = default;
+
+  // Implementation of TensorData methods.
+  size_t byte_size() const override { return values_.size() * sizeof(T); }
+  const void* data() const override { return values_.data(); }
+
+ private:
+  std::vector<T> values_;
+};
+
+template <typename T>
+Status CreateDataFromVector(DataType datatype_from_proto, std::vector<T> values,
+                            std::unique_ptr<TensorData>& data) {
+  if (data != nullptr) {
+    return FCP_STATUS(INVALID_ARGUMENT)
+           << "Tensor proto contains multiple representations of data.";
+  }
+  if (internal::TypeTraits<T>::kDataType != datatype_from_proto) {
+    return FCP_STATUS(INVALID_ARGUMENT)
+           << "Tensor proto contains data of unexpected data type.";
+  }
+  data = std::make_unique<VectorNumericData<T>>(std::move(values));
+  return FCP_STATUS(OK);
+}
+
 StatusOr<Tensor> Tensor::FromProto(const TensorProto& tensor_proto) {
+  if (tensor_proto.dtype() == DT_INVALID) {
+    return FCP_STATUS(INVALID_ARGUMENT) << "Invalid Tensor dtype.";
+  }
   FCP_ASSIGN_OR_RETURN(TensorShape shape,
                        TensorShape::FromProto(tensor_proto.shape()));
   // TODO(team): The num_values is valid only for dense tensors.
   FCP_ASSIGN_OR_RETURN(size_t num_values, shape.NumElements());
-  StatusOr<std::unique_ptr<TensorData>> data;
-  DTYPE_CASES(tensor_proto.dtype(), T,
-              data = DecodeContent<T>(tensor_proto.content(), num_values));
-  FCP_RETURN_IF_ERROR(data);
-  return Create(tensor_proto.dtype(), std::move(shape),
-                std::move(data).value());
+  std::unique_ptr<TensorData> data;
+  if (!tensor_proto.content().empty()) {
+    std::string content = AlignedCopyOf(tensor_proto.content());
+    DTYPE_CASES(tensor_proto.dtype(), T,
+                FCP_ASSIGN_OR_RETURN(
+                    data, DecodeContent<T>(std::move(content), num_values)));
+  }
+  if (tensor_proto.float_val_size() > 0) {
+    FCP_RETURN_IF_ERROR(CreateDataFromVector(
+        tensor_proto.dtype(),
+        std::vector<float>(tensor_proto.float_val().begin(),
+                           tensor_proto.float_val().end()),
+        data));
+  }
+  if (tensor_proto.double_val_size() > 0) {
+    FCP_RETURN_IF_ERROR(CreateDataFromVector(
+        tensor_proto.dtype(),
+        std::vector<double>(tensor_proto.double_val().begin(),
+                            tensor_proto.double_val().end()),
+        data));
+  }
+  if (tensor_proto.int_val_size() > 0) {
+    FCP_RETURN_IF_ERROR(
+        CreateDataFromVector(tensor_proto.dtype(),
+                             std::vector<int>(tensor_proto.int_val().begin(),
+                                              tensor_proto.int_val().end()),
+                             data));
+  }
+  if (tensor_proto.int64_val_size() > 0) {
+    FCP_RETURN_IF_ERROR(CreateDataFromVector(
+        tensor_proto.dtype(),
+        std::vector<int64_t>(tensor_proto.int64_val().begin(),
+                             tensor_proto.int64_val().end()),
+        data));
+  }
+  if (data == nullptr) {
+    return FCP_STATUS(INVALID_ARGUMENT) << "Tensor proto contains no data.";
+  }
+  return Create(tensor_proto.dtype(), std::move(shape), std::move(data));
 }
 
 StatusOr<Tensor> Tensor::FromProto(TensorProto&& tensor_proto) {
@@ -235,8 +325,9 @@ StatusOr<Tensor> Tensor::FromProto(TensorProto&& tensor_proto) {
   FCP_ASSIGN_OR_RETURN(size_t num_values, shape.NumElements());
   std::string content = std::move(*tensor_proto.mutable_content());
   StatusOr<std::unique_ptr<TensorData>> data;
-  DTYPE_CASES(tensor_proto.dtype(), T,
-              data = DecodeContent<T>(std::move(content), num_values));
+  DTYPE_CASES(
+      tensor_proto.dtype(), T,
+      data = DecodeContent<T>(MakeAligned<T>(std::move(content)), num_values));
   FCP_RETURN_IF_ERROR(data);
   return Create(tensor_proto.dtype(), std::move(shape),
                 std::move(data).value());
@@ -254,8 +345,6 @@ TensorProto Tensor::ToProto() const {
   *(tensor_proto.mutable_content()) = std::move(content);
   return tensor_proto;
 }
-
-#endif  // FCP_NANOLIBC
 
 }  // namespace aggregation
 }  // namespace fcp

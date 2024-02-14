@@ -215,7 +215,6 @@ absl::Status RunPlanWithTensorflowSpec(
     log_manager->LogDiag(
         ProdDiagCode::BACKGROUND_TRAINING_TFLITE_MODEL_INCLUDED);
   }
-
   if (flags->use_tflite_training() && !client_plan.tflite_graph().empty()) {
     auto inputs = ConstructInputsForTFLitePlan(
         client_plan.phase().local_compute(), input_dir_uri, output_dir_uri,
@@ -225,9 +224,9 @@ absl::Status RunPlanWithTensorflowSpec(
           inputs.status(), ExampleStats(), NetworkStats(), run_plan_start_time);
       return inputs.status();
     }
-    engine::TfLitePlanEngine plan_engine(example_iterator_factories,
-                                         should_abort, log_manager,
-                                         opstats_logger, flags, &timing_config);
+    engine::TfLitePlanEngine plan_engine(
+        example_iterator_factories, should_abort, log_manager, opstats_logger,
+        flags, /*example_iterator_query_recorder=*/nullptr, &timing_config);
     engine::PlanResult plan_result = plan_engine.RunPlan(
         client_plan.phase().tensorflow_spec(), client_plan.tflite_graph(),
         std::move(*inputs), output_names_unused);
@@ -248,9 +247,9 @@ absl::Status RunPlanWithTensorflowSpec(
         inputs.status(), ExampleStats(), NetworkStats(), run_plan_start_time);
     return inputs.status();
   }
-  engine::SimplePlanEngine plan_engine(example_iterator_factories, should_abort,
-                                       log_manager, opstats_logger,
-                                       &timing_config);
+  engine::SimplePlanEngine plan_engine(
+      example_iterator_factories, should_abort, log_manager, opstats_logger,
+      /*example_iterator_query_recorder=*/nullptr, &timing_config);
   engine::PlanResult plan_result = plan_engine.RunPlan(
       client_plan.phase().tensorflow_spec(), client_plan.graph(),
       client_plan.tensorflow_config_proto(), std::move(*inputs),
@@ -316,7 +315,7 @@ absl::Status RunLocalComputation(
   // Local compute plans can use example iterators from the
   // SimpleTaskEnvironment and those reading the OpStats DB.
   opstats::OpStatsExampleIteratorFactory opstats_example_iterator_factory(
-      opstats_logger, log_manager);
+      opstats_logger, log_manager, flags->neet_tf_custom_policy_support());
   std::unique_ptr<engine::ExampleIteratorFactory> env_example_iterator_factory =
       CreateSimpleTaskEnvironmentIteratorFactory(env_deps, selector_context);
   std::vector<engine::ExampleIteratorFactory*> example_iterator_factories{

@@ -26,9 +26,11 @@ from typing import Optional
 import uuid
 
 from absl import logging
+import tensorflow as tf
 
 from google.longrunning import operations_pb2
 from google.rpc import code_pb2
+from fcp.aggregation.core import tensor_pb2 as aggregation_tensor_pb2
 from fcp.aggregation.protocol import aggregation_protocol_messages_pb2 as apm_pb2
 from fcp.aggregation.protocol import configuration_pb2
 from fcp.aggregation.protocol.python import aggregation_protocol
@@ -94,9 +96,6 @@ class _ActiveClientData:
   """Information about an active client."""
   # The client's identifier in the aggregation protocol.
   client_id: int
-  # Queue receiving the final status of the client connection (if closed by the
-  # aggregation protocol). At most one value will be written.
-  close_status: queue.SimpleQueue[absl_status.Status]
   # The name of the resource to which the client should write its update.
   resource_name: str
 
@@ -114,34 +113,14 @@ class _WaitData:
       default_factory=asyncio.Future)
 
 
-class _AggregationProtocolCallback(
-    aggregation_protocol.AggregationProtocol.Callback):
-  """AggregationProtocol.Callback that writes events to queues."""
-
-  def __init__(self):
-    """Constructs a new _AggregationProtocolCallback..
-    """
-    super().__init__()
-    # A map from client id to the queue for each client's close status. The
-    # queue will provide the diagnostic status when the client is closed. (The
-    # status queue is being used as a future and will only receive one element.)
-    self.client_results: dict[int, queue.SimpleQueue[absl_status.Status]] = {}
-
-  def OnCloseClient(self, client_id: int,
-                    diagnostic_status: absl_status.Status) -> None:
-    self.client_results.pop(client_id).put(diagnostic_status)
-
-
 @dataclasses.dataclass(eq=False)
 class _AggregationSessionState:
   """Internal state for an aggregation session."""
   # The session's aggregation requirements.
   requirements: AggregationRequirements
-  # The AggregationProtocol.Callback object receiving protocol events.
-  callback: _AggregationProtocolCallback
   # The protocol performing the aggregation. Service._sessions_lock should not
-  # be held while AggregationProtocol methods are invoked -- both because
-  # methods may be slow and because callbacks may also need to acquire the lock.
+  # be held while AggregationProtocol methods are invoked because
+  # methods may be slow.
   agg_protocol: aggregation_protocol.AggregationProtocol
   # The current status of the session.
   status: AggregationStatus = AggregationStatus.PENDING
@@ -168,7 +147,6 @@ class Service:
                      aggregation_requirements: AggregationRequirements) -> str:
     """Creates a new aggregation session and returns its id."""
     session_id = str(uuid.uuid4())
-    callback = _AggregationProtocolCallback()
     if (len(aggregation_requirements.plan.phase) != 1 or
         not aggregation_requirements.plan.phase[0].HasField('server_phase_v2')):
       raise ValueError('Plan must contain exactly one server_phase_v2.')
@@ -179,17 +157,20 @@ class Service:
     # client contributions. Utilities for combining results from separate shards
     # are still in development as of Jan 2023.
     agg_protocol = aggregation_protocols.create_simple_aggregation_protocol(
-        configuration_pb2.Configuration(aggregation_configs=[
-            self._translate_server_aggregation_config(aggregation_config)
-            for aggregation_config in
-            aggregation_requirements.plan.phase[0].server_phase_v2.aggregations
-        ]), callback)
+        configuration_pb2.Configuration(
+            intrinsic_configs=[
+                self._translate_server_aggregation_config(aggregation_config)
+                for aggregation_config in aggregation_requirements.plan.phase[
+                    0
+                ].server_phase_v2.aggregations
+            ]
+        )
+    )
     agg_protocol.Start(0)
 
     with self._sessions_lock:
       self._sessions[session_id] = _AggregationSessionState(
           requirements=aggregation_requirements,
-          callback=callback,
           agg_protocol=agg_protocol)
     return session_id
 
@@ -274,14 +255,41 @@ class Service:
       self._sessions[session_id].authorization_tokens |= tokens
     return list(tokens)
 
+  def _translate_tensor_spec_proto(
+      self, tensor_spec_proto
+  ) -> aggregation_tensor_pb2.TensorSpecProto:
+    """Transform TensorSpecProto for use by the aggregation service."""
+    transformed_tensor = aggregation_tensor_pb2.TensorSpecProto(
+        name=tensor_spec_proto.name
+    )
+    transformed_tensor.shape.dim_sizes.extend(
+        [dim.size for dim in tensor_spec_proto.shape.dim]
+    )
+    dtype = tf.dtypes.as_dtype(tensor_spec_proto.dtype)
+    if dtype == tf.float32:
+      transformed_tensor.dtype = aggregation_tensor_pb2.DataType.DT_FLOAT
+    elif dtype == tf.double:
+      transformed_tensor.dtype = aggregation_tensor_pb2.DataType.DT_DOUBLE
+    elif dtype == tf.string:
+      transformed_tensor.dtype = aggregation_tensor_pb2.DataType.DT_STRING
+    elif dtype == tf.int32:
+      transformed_tensor.dtype = aggregation_tensor_pb2.DataType.DT_INT32
+    elif dtype == tf.int64:
+      transformed_tensor.dtype = aggregation_tensor_pb2.DataType.DT_INT64
+    elif dtype == tf.uint64:
+      transformed_tensor.dtype = aggregation_tensor_pb2.DataType.DT_UINT64
+    else:
+      raise AssertionError('Cases should have exhausted all possible dtypes.')
+    return transformed_tensor
+
   def _translate_intrinsic_arg(
       self, intrinsic_arg: plan_pb2.ServerAggregationConfig.IntrinsicArg
-  ) -> configuration_pb2.Configuration.ServerAggregationConfig.IntrinsicArg:
+  ) -> configuration_pb2.Configuration.IntrinsicConfig.IntrinsicArg:
     """Transform an aggregation intrinsic arg for the aggregation service."""
     if intrinsic_arg.HasField('input_tensor'):
-      return (
-          configuration_pb2.Configuration.ServerAggregationConfig.IntrinsicArg(
-              input_tensor=intrinsic_arg.input_tensor
+      return configuration_pb2.Configuration.IntrinsicConfig.IntrinsicArg(
+          input_tensor=self._translate_tensor_spec_proto(
+              intrinsic_arg.input_tensor
           )
       )
     elif intrinsic_arg.HasField('state_tensor'):
@@ -295,17 +303,21 @@ class Service:
 
   def _translate_server_aggregation_config(
       self, plan_aggregation_config: plan_pb2.ServerAggregationConfig
-  ) -> configuration_pb2.Configuration.ServerAggregationConfig:
+  ) -> configuration_pb2.Configuration.IntrinsicConfig:
     """Transform the aggregation config for use by the aggregation service."""
     if plan_aggregation_config.inner_aggregations:
       raise AssertionError('Nested intrinsic structrues are not supported yet.')
-    return configuration_pb2.Configuration.ServerAggregationConfig(
+    return configuration_pb2.Configuration.IntrinsicConfig(
         intrinsic_uri=plan_aggregation_config.intrinsic_uri,
         intrinsic_args=[
             self._translate_intrinsic_arg(intrinsic_arg)
             for intrinsic_arg in plan_aggregation_config.intrinsic_args
         ],
-        output_tensors=plan_aggregation_config.output_tensors)
+        output_tensors=[
+            self._translate_tensor_spec_proto(output_tensor)
+            for output_tensor in plan_aggregation_config.output_tensors
+        ],
+    )
 
   def _get_session_status(self,
                           state: _AggregationSessionState) -> SessionStatus:
@@ -370,13 +382,12 @@ class Service:
 
     client_id = state.agg_protocol.AddClients(1)
     client_token = str(uuid.uuid4())
-    close_status = queue.SimpleQueue()
-    state.callback.client_results[client_id] = close_status
     upload_name = self._media_service.register_upload()
 
     with self._sessions_lock:
       state.active_clients[client_token] = _ActiveClientData(
-          client_id, close_status, upload_name)
+          client_id, upload_name
+      )
 
     forwarding_info = self._forwarding_info()
     response = aggregations_pb2.StartAggregationDataUploadResponse(
@@ -415,11 +426,15 @@ class Service:
 
     # The aggregation protocol may have already closed the connect (e.g., if
     # an error occurred). If so, clean up the upload and return the error.
-    if not client_data.close_status.empty():
+    close_message = state.agg_protocol.PollServerMessage(client_data.client_id)
+    if close_message:
       with contextlib.suppress(KeyError):
         self._media_service.finalize_upload(request.resource_name)
       raise http_actions.HttpError(
-          self._get_http_status(client_data.close_status.get().code()))
+          self._get_http_status(
+              close_message.simple_aggregation.close_message.code
+          )
+      )
 
     # Finalize the upload.
     try:
@@ -432,10 +447,9 @@ class Service:
       if isinstance(e, KeyError):
         e = absl_status.StatusNotOk(
             absl_status.internal_error('Failed to finalize upload'))
-      state.agg_protocol.CloseClient(client_data.client_id, e.status)
-      # Since we're initiating the close, it's also necessary to notify the
-      # _AggregationProtocolCallback so it can clean up resources.
-      state.callback.OnCloseClient(client_data.client_id, e.status)
+      state.agg_protocol.CloseClient(
+          client_data.client_id, e.status.message(), e.status.raw_code()
+      )
       raise http_actions.HttpError(self._get_http_status(
           e.status.code())) from e
 
@@ -451,10 +465,12 @@ class Service:
       logging.warning('Failed to receive client input: %s', e)
       raise http_actions.HttpError(http.HTTPStatus.INTERNAL_SERVER_ERROR) from e
 
-    # Wait for the client input to be processed.
-    close_status = client_data.close_status.get()
-    if not close_status.ok():
-      raise http_actions.HttpError(self._get_http_status(close_status.code()))
+    # Poll the close status of the client.
+    close_status = state.agg_protocol.PollServerMessage(
+        client_data.client_id
+    ).simple_aggregation.close_message.code
+    if close_status != absl_status.StatusCode.OK.value:
+      raise http_actions.HttpError(self._get_http_status(close_status))
 
     # Check for any newly-satisfied pending wait operations.
     with self._sessions_lock:
@@ -496,13 +512,14 @@ class Service:
     if request.status.code == code_pb2.Code.OK:
       status = absl_status.Status.OkStatus()
     else:
-      status = absl_status.BuildStatusNotOk(
+      status = absl_status.Status(
           absl_status.StatusCodeFromInt(request.status.code),
-          request.status.message)
-    state.agg_protocol.CloseClient(client_data.client_id, status)
-    # Since we're initiating the close, it's also necessary to notify the
-    # _AggregationProtocolCallback so it can clean up resources.
-    state.callback.OnCloseClient(client_data.client_id, status)
+          request.status.message,
+      )
+
+    state.agg_protocol.CloseClient(
+        client_data.client_id, status.message(), status.raw_code()
+    )
 
     logging.debug('[%s] AbortAggregation: %s', request.aggregation_id,
                   request.status)

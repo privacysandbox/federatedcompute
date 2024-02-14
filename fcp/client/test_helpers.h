@@ -16,7 +16,11 @@
 #ifndef FCP_CLIENT_TEST_HELPERS_H_
 #define FCP_CLIENT_TEST_HELPERS_H_
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <variant>
@@ -26,13 +30,15 @@
 #include "gmock/gmock.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "fcp/base/monitoring.h"
+#include "absl/strings/string_view.h"
+#include "absl/time/time.h"
 #include "fcp/client/engine/example_iterator_factory.h"
 #include "fcp/client/event_publisher.h"
 #include "fcp/client/federated_protocol.h"
 #include "fcp/client/federated_select.h"
 #include "fcp/client/flags.h"
 #include "fcp/client/http/http_client.h"
+#include "fcp/client/interruptible_runner.h"
 #include "fcp/client/log_manager.h"
 #include "fcp/client/opstats/opstats_db.h"
 #include "fcp/client/opstats/opstats_logger.h"
@@ -40,6 +46,8 @@
 #include "fcp/client/secagg_event_publisher.h"
 #include "fcp/client/secagg_runner.h"
 #include "fcp/client/simple_task_environment.h"
+#include "fcp/client/stats.h"
+#include "google/protobuf/repeated_ptr_field.h"
 #include "tensorflow/core/example/example.pb.h"
 #include "tensorflow/core/example/feature.pb.h"
 
@@ -148,6 +156,8 @@ class MockEventPublisher : public EventPublisher {
                const ExampleStats& example_stats,
                absl::Duration phase_duration),
               (override));
+  MOCK_METHOD(void, PublishEligibilityEvalComputationErrorNonfatal,
+              (absl::string_view error_message), (override));
   MOCK_METHOD(void, PublishEligibilityEvalComputationCompleted,
               (const ExampleStats& example_stats,
                absl::Duration phase_duration),
@@ -485,6 +495,17 @@ class MockFederatedProtocol : public FederatedProtocol {
               (ComputationResults results, absl::Duration plan_duration,
                std::optional<std::string> aggregation_session_id));
 
+  absl::Status ReportViaConfidentialAggregation(
+      const google::internal::federatedcompute::v1::TaskAssignment::
+          ConfidentialAggregationInfo& agg_info,
+      ComputationResults results, absl::Duration plan_duration,
+      std::optional<std::string> aggregation_session_id) final {
+    return absl::UnimplementedError("");
+  };
+  MOCK_METHOD(absl::Status, MockReportViaConfidentialAggregation,
+              (ComputationResults results, absl::Duration plan_duration,
+               std::optional<std::string> aggregation_session_id));
+
   absl::Status ReportNotCompleted(
       engine::PhaseOutcome phase_outcome, absl::Duration plan_duration,
       std::optional<std::string> aggregation_session_id) final {
@@ -545,11 +566,11 @@ class MockOpStatsLogger : public ::fcp::client::opstats::OpStatsLogger {
               (override));
   MOCK_METHOD(void, SetNetworkStats, (const NetworkStats& network_stats),
               (override));
+  MOCK_METHOD(void, SetMinSepPolicyIndex, (int64_t current_index), (override));
   MOCK_METHOD(void, SetRetryWindow,
               (google::internal::federatedml::v2::RetryWindow retry_window),
               (override));
   MOCK_METHOD(::fcp::client::opstats::OpStatsDb*, GetOpStatsDb, (), (override));
-  MOCK_METHOD(bool, IsOpStatsEnabled, (), (const override));
   MOCK_METHOD(absl::Status, CommitToStorage, (), (override));
   MOCK_METHOD(std::string, GetCurrentTaskName, (), (override));
   MOCK_METHOD(void, StartLoggingForPhase,
@@ -576,6 +597,8 @@ class MockSimpleTaskEnvironment : public SimpleTaskEnvironment {
   MOCK_METHOD(std::unique_ptr<fcp::client::http::HttpClient>, CreateHttpClient,
               (), (override));
   MOCK_METHOD(bool, TrainingConditionsSatisfied, (), (override));
+  MOCK_METHOD(bool, OnTaskCompleted, (const TaskResultInfo& task_result_info),
+              (override));
 };
 
 class MockExampleIterator : public ExampleIterator {
@@ -615,7 +638,6 @@ class MockFlags : public Flags {
               (const, override));
   MOCK_METHOD(int64_t, grpc_channel_deadline_seconds, (), (const, override));
   MOCK_METHOD(bool, log_tensorflow_error_messages, (), (const, override));
-  MOCK_METHOD(bool, enable_opstats, (), (const, override));
   MOCK_METHOD(int64_t, opstats_ttl_days, (), (const, override));
   MOCK_METHOD(int64_t, opstats_db_size_limit_bytes, (), (const, override));
   MOCK_METHOD(int64_t, federated_training_transient_errors_retry_delay_secs, (),
@@ -630,7 +652,6 @@ class MockFlags : public Flags {
               (), (const, override));
   MOCK_METHOD(std::vector<int32_t>, federated_training_permanent_error_codes,
               (), (const, override));
-  MOCK_METHOD(bool, use_tflite_training, (), (const, override));
   MOCK_METHOD(bool, enable_grpc_with_http_resource_support, (),
               (const, override));
   MOCK_METHOD(bool, enable_grpc_with_eligibility_eval_http_resource_support, (),
@@ -654,6 +675,16 @@ class MockFlags : public Flags {
   MOCK_METHOD(bool, enable_phase_stats_logging, (), (const, override));
   MOCK_METHOD(bool, enable_lightweight_client_report_wire_format, (),
               (const, override));
+  MOCK_METHOD(bool, check_eligibility_population_spec_before_checkin, (),
+              (const, override));
+  MOCK_METHOD(bool, enable_task_completion_callback, (), (const, override));
+  MOCK_METHOD(bool, enable_native_example_query_recording, (),
+              (const, override));
+  MOCK_METHOD(bool, enable_confidential_aggregation, (), (const, override));
+  MOCK_METHOD(bool, enable_minimum_separation_policy, (), (const, override));
+  MOCK_METHOD(bool, graceful_eligibility_policy_failure, (), (const, override));
+  MOCK_METHOD(bool, use_thread_safe_tflite_wrapper, (), (const, override));
+  MOCK_METHOD(bool, skip_empty_output_checkpoints, (), (const, override));
 };
 
 // Helper methods for extracting opstats fields from TF examples.
@@ -746,6 +777,8 @@ class MockPhaseLogger : public PhaseLogger {
               (absl::Status error_status, const ExampleStats& example_stats,
                absl::Time run_plan_start_time, absl::Time reference_time),
               (override));
+  MOCK_METHOD(void, LogEligibilityEvalComputationErrorNonfatal,
+              (absl::Status error_status), (override));
   MOCK_METHOD(void, LogEligibilityEvalComputationCompleted,
               (const ExampleStats& example_stats,
                absl::Time run_plan_start_time, absl::Time reference_time),
@@ -822,9 +855,10 @@ class MockPhaseLogger : public PhaseLogger {
   MOCK_METHOD(void, LogCheckinCompleted,
               (absl::string_view task_name, const NetworkStats& network_stats,
                absl::Time time_before_checkin,
-               absl::Time time_before_plan_download, absl::Time reference_time),
+               absl::Time time_before_plan_download, absl::Time reference_time,
+               (std::optional<int64_t> min_sep_policy_index)),
               (override));
-  MOCK_METHOD(void, LogCollectionFirstAccessTime, (absl::string_view),
+  MOCK_METHOD(void, MaybeLogCollectionFirstAccessTime, (absl::string_view),
               (override));
   MOCK_METHOD(void, LogComputationStarted, (absl::string_view), (override));
   MOCK_METHOD(void, LogComputationInvalidArgument,

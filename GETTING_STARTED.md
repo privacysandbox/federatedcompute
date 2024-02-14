@@ -6,14 +6,14 @@
 
 There are some basic tools and packages you will need on your machine:
 
-*   Git
-*   A C++ compiler (e.g., Clang or GCC, but see note about GCC below)
-*   Python 3.9 or greater, including the `venv` module
+*   Java Development Kit (JDK)
+*   Python 3
+*   libstdc++
 
 For example, on Debian:
 
 ```
-sudo apt install -y git gcc python3 python3-dev python3-venv
+sudo apt install -y default-jdk-headless python3 libstdc++-10-dev
 ```
 
 > ⚠️ The project maintainers internally test with Clang only, so support for
@@ -22,9 +22,6 @@ sudo apt install -y git gcc python3 python3-dev python3-venv
 >
 > If using GCC then we recommend using a recent version (e.g., at least as
 > recent as what Debian stable uses, preferably newer than that).
->
-> If using Clang then please see [Building with Clang](#building-with-clang) for
-> further Clang-specific instructions.
 
 ### Install Bazelisk
 
@@ -32,32 +29,6 @@ Bazelisk is used to fetch the correct Bazel binaries necessary to build and run
 Federated Compute code.
 
 Please read https://github.com/bazelbuild/bazelisk#installation.
-
-## Set up your Python environment
-
-Setting up a virtual Python environment will ensure that Python dependencies
-don't conflict or overwrite your existing Python installation. If you have
-multiple installed versions of Python, replace `python3` in the following
-instructions with the desired version (e.g., `python3.X`).
-
-```
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
-```
-
-Note: To exit the virtual environment, run `deactivate`.
-
-## Clone the Federated Compute repository and install Python requirements
-
-```
-git clone https://github.com/google/federated-compute.git
-cd federated-compute
-pip install -r requirements.txt
-# Important: this ensures that the TFF dependency is fully initialized before
-# we try to use via the bazel-based build.
-python3 -c "import tensorflow_federated"
-```
 
 ## Build and run the federated program test!
 
@@ -72,13 +43,4 @@ python3 -c "import tensorflow_federated"
 
 ```
 bazelisk test //fcp/demo:federated_program_test
-```
-
-### Building with Clang
-
-Use `--config=clang` to build with clang and libc++. On Debian, this requires
-installing several additional packages:
-
-```
-sudo apt install -y clang lld libc++-dev libc++abi-dev
 ```

@@ -20,6 +20,7 @@ import unittest
 
 from absl import flags
 from absl.testing import absltest
+import numpy as np
 import tensorflow as tf
 import tensorflow_federated as tff
 
@@ -42,9 +43,15 @@ def initialize() -> tff.Value:
   return tff.federated_value(0, tff.SERVER)
 
 
+@tff.tf_computation(np.int32, np.int32)
+def _add(x: int, y: int) -> int:
+  return x + y
+
+
 @tff.federated_computation(
-    tff.type_at_server(tf.int32),
-    tff.type_at_clients(tff.SequenceType(tf.string)))
+    tff.FederatedType(np.int32, tff.SERVER),
+    tff.FederatedType(tff.SequenceType(np.str_), tff.CLIENTS),
+)
 def sum_counts(state, client_data):
   """Sums the value of all 'count' features across all clients."""
 
@@ -61,21 +68,23 @@ def sum_counts(state, client_data):
   client_counts = tff.federated_map(client_work, client_data)
   aggregated_count = tff.federated_sum(client_counts)
 
+  updated_state = tff.federated_map(_add, (state, aggregated_count))
   num_clients = tff.federated_sum(tff.federated_value(1, tff.CLIENTS))
   metrics = tff.federated_zip((num_clients,))
-  return state + aggregated_count, metrics
+  return updated_state, metrics
 
 
 @tff.federated_computation(
-    tff.type_at_server(tf.int32),
-    tff.type_at_clients(tff.SequenceType(tf.string)),
+    tff.FederatedType(np.int32, tff.SERVER),
+    tff.FederatedType(tff.SequenceType(np.str_), tff.CLIENTS),
 )
 def count_clients(state, client_data):
   """Counts the number of clients."""
   del client_data
   num_clients = tff.federated_sum(tff.federated_value(1, tff.CLIENTS))
+  updated_state = tff.federated_map(_add, (state, num_clients))
   metrics = tff.federated_zip((tff.federated_value(0, tff.SERVER),))
-  return state + num_clients, metrics
+  return updated_state, metrics
 
 
 async def program_logic(
@@ -146,10 +155,14 @@ async def run_client(population_name: str, server_url: str, num_rounds: int,
     tmpfile.write(example_data.SerializeToString())
     tmpfile.flush()
     subprocess = await asyncio.create_subprocess_exec(
-        client_runner, f'--population={population_name}',
-        f'--server={server_url}', f'--example_data_path={tmpfile.name}',
-        f'--num_rounds={num_rounds}', '--sleep_after_round_secs=1',
-        '--use_http_federated_compute_protocol', '--use_tflite_training')
+        client_runner,
+        f'--population={population_name}',
+        f'--server={server_url}',
+        f'--example_data_path={tmpfile.name}',
+        f'--num_rounds={num_rounds}',
+        '--sleep_after_round_secs=1',
+        '--use_http_federated_compute_protocol',
+    )
     return await subprocess.wait()
 
 
@@ -200,20 +213,14 @@ class FederatedProgramTest(absltest.TestCase, unittest.IsolatedAsyncioTestCase):
         # All clients should complete successfully.
         self.assertListEqual(return_codes, [0] * len(client_counts))
 
-    self.assertSequenceEqual(
+    self.assertEqual(
         release_manager.values()['0/result'],
-        (
-            num_rounds * sum([sum(l) for l in client_counts]),
-            tff.type_at_server(tf.int32),
-        ),
+        num_rounds * sum([sum(l) for l in client_counts]),
     )
     for i in range(num_rounds):
-      self.assertSequenceEqual(
+      self.assertEqual(
           release_manager.values()[f'0/metrics/{i}'],
-          (
-              (len(client_counts),),
-              tff.type_at_server(tff.StructWithPythonType([tf.int32], tuple)),
-          ),
+          (len(client_counts),),
       )
 
   async def test_multiple_assignment(self):
@@ -263,13 +270,14 @@ class FederatedProgramTest(absltest.TestCase, unittest.IsolatedAsyncioTestCase):
 
     # With multiple assignment, clients should have contributed to both
     # computations.
-    self.assertSequenceEqual(
+    self.assertEqual(
         release_manager.values()['0/result'],
-        (sum([sum(l) for l in client_counts]), tff.type_at_server(tf.int32)),
+        sum([sum(l) for l in client_counts]),
     )
-    self.assertSequenceEqual(
+    expected_result = len(client_counts)
+    self.assertEqual(
         release_manager.values()['1/result'],
-        (len(client_counts), tff.type_at_server(tf.int32)),
+        expected_result,
     )
 
 

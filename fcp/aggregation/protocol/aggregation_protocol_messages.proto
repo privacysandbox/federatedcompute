@@ -51,6 +51,7 @@ message ClientMessage {
 message ServerMessage {
   oneof protocol_kind {
     SecureAggregation secure_aggregation = 1;
+    SimpleAggregation simple_aggregation = 2;
   }
 
   message SecureAggregation {
@@ -59,22 +60,39 @@ message ServerMessage {
       SecureAggregationAcceptanceMessage acceptance_message = 2;
     }
   }
+
+  message SimpleAggregation {
+    oneof content_kind {
+      CloseMessage close_message = 1;
+    }
+
+    message CloseMessage {
+      // The status code, which should be an enum value of absl::StatusCode.
+      int32 code = 1;
+      // An optional diagnostic message.
+      string message = 2;
+    }
+  }
 }
 
 message SecureAggregationAcceptanceMessage {
   // TODO(team): define this message.
 }
 
-// Polymorhic server-to-client message which content is included into
-// response to each client when that client joins the aggregation and shortly
-// before the client begins the aggregation protocol.
-message AcceptanceMessage {
-  // TODO(team)
-  oneof protocol_kind {
-    SecureAggregation secure_aggregation = 1;
-  }
-
-  message SecureAggregation {}
+// Describes the overall protocol state.
+enum ProtocolState {
+  PROTOCOL_STATE_UNKNOWN = 0;
+  // The initial state indicating that the protocol was created.
+  PROTOCOL_CREATED = 1;
+  // The protocol `Start` method has been called.
+  PROTOCOL_STARTED = 2;
+  // The protocol `Complete` method has been called but there is outstanding
+  // work.
+  PROTOCOL_COMPLETING = 3;
+  // The protocol has finished successfully.
+  PROTOCOL_COMPLETED = 4;
+  // The protocol `Abort` method has been called.
+  PROTOCOL_ABORTED = 5;
 }
 
 // Status of the aggregation protocol.
@@ -122,4 +140,7 @@ message StatusMessage {
   // whatever reason, for example if the protocol has reached a state where it
   // no longer needs client inputs to complete.
   int64 num_inputs_discarded = 7;
+
+  // Current state of the protocol
+  ProtocolState protocol_state = 8;
 }

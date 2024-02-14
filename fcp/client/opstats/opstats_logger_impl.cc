@@ -15,6 +15,7 @@
  */
 #include "fcp/client/opstats/opstats_logger_impl.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -102,6 +103,11 @@ void OpStatsLoggerImpl::AddEventWithErrorMessage(
       stats_.set_error_message(error_message);
     }
   }
+}
+
+void OpStatsLoggerImpl::SetMinSepPolicyIndex(int64_t current_index) {
+  absl::MutexLock lock(&mutex_);
+  stats_.set_min_sep_policy_index(current_index);
 }
 
 void OpStatsLoggerImpl::RecordCollectionFirstAccessTime(

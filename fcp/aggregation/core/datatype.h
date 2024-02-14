@@ -20,45 +20,13 @@
 #include <cstdint>
 
 #include "fcp/base/monitoring.h"
-
-#ifndef FCP_NANOLIBC
 #include "absl/strings/string_view.h"
 #include "fcp/aggregation/core/tensor.pb.h"
-#endif
 
 namespace fcp {
 namespace aggregation {
 
-#ifndef FCP_NANOLIBC
-// Unless when building with Nanolibc, we can use absl::string_view directly.
 using string_view = absl::string_view;
-#else
-// TODO(team): Minimal implementation of string_view for bare-metal
-// environment.
-struct string_view {};
-#endif
-
-#ifdef FCP_NANOLIBC
-// TODO(team): Derive these values from tensor.proto built with Nanopb
-enum DataType {
-  // The constants below should be kept in sync with tensorflow::Datatype:
-  // https://github.com/tensorflow/tensorflow/blob/master/tensorflow/core/framework/types.proto
-  // While not strictly required, that has a number of benefits.
-  DT_INVALID = 0,
-  DT_FLOAT = 1,
-  DT_DOUBLE = 2,
-  DT_INT32 = 3,
-  DT_STRING = 7,
-  DT_INT64 = 9,
-
-  // TODO(team): Add other types.
-  // This should be a small subset of tensorflow::DataType types and include
-  // only simple numeric types and floating point types.
-  //
-  // When a tensor DT_ type is added here, it must also be added to the list of
-  // MATCH_TYPE_AND_DTYPE macros below and to the CASES macro.
-};
-#endif  // FCP_NANOLIBC
 
 namespace internal {
 
@@ -90,6 +58,7 @@ MATCH_TYPE_AND_DTYPE(float, DT_FLOAT, TypeKind::kNumeric);
 MATCH_TYPE_AND_DTYPE(double, DT_DOUBLE, TypeKind::kNumeric);
 MATCH_TYPE_AND_DTYPE(int32_t, DT_INT32, TypeKind::kNumeric);
 MATCH_TYPE_AND_DTYPE(int64_t, DT_INT64, TypeKind::kNumeric);
+MATCH_TYPE_AND_DTYPE(uint64_t, DT_UINT64, TypeKind::kNumeric);
 MATCH_TYPE_AND_DTYPE(string_view, DT_STRING, TypeKind::kString);
 
 // The macros DTYPE_CASE and DTYPE_CASES are used to translate Tensor DataType
@@ -128,8 +97,9 @@ MATCH_TYPE_AND_DTYPE(string_view, DT_STRING, TypeKind::kString);
   DTYPE_CASE(double, TYPE_ARG, STMTS)
 
 #define DTYPE_INTEGER_CASES(TYPE_ARG, STMTS) \
-  DTYPE_CASE(int32_t, TYPE_ARG, STMTS)       \
-  DTYPE_CASE(int64_t, TYPE_ARG, STMTS)
+DTYPE_CASE(int32_t, TYPE_ARG, STMTS)         \
+DTYPE_CASE(int64_t, TYPE_ARG, STMTS)         \
+DTYPE_CASE(uint64_t, TYPE_ARG, STMTS)
 
 #define DTYPE_NUMERICAL_CASES(TYPE_ARG, STMTS) \
   DTYPE_FLOATING_CASES(TYPE_ARG, STMTS)        \

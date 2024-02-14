@@ -11,11 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either expresus or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for federated_computation."""
 
 from unittest import mock
 
 from absl.testing import absltest
+import numpy as np
 import tensorflow as tf
 import tensorflow_federated as tff
 
@@ -28,8 +28,9 @@ def add_values(x, y):
 
 
 @tff.federated_computation(
-    tff.type_at_server(tf.int32),
-    tff.type_at_clients(tff.SequenceType(tf.string)))
+    tff.FederatedType(np.int32, tff.SERVER),
+    tff.FederatedType(tff.SequenceType(np.str_), tff.CLIENTS),
+)
 def count_clients(state, client_data):
   """Example TFF computation that counts clients."""
   del client_data
@@ -40,8 +41,9 @@ def count_clients(state, client_data):
 
 
 @tff.federated_computation(
-    tff.type_at_server(tf.int32),
-    tff.type_at_clients(tff.SequenceType(tf.string)))
+    tff.FederatedType(np.int32, tff.SERVER),
+    tff.FederatedType(tff.SequenceType(np.str_), tff.CLIENTS),
+)
 def count_examples(state, client_data):
   """Example TFF computation that counts client examples."""
 
@@ -63,12 +65,12 @@ class FederatedComputationTest(absltest.TestCase):
 
   def test_incompatible_computation(self):
     # This function doesn't have the return value structure required for MRF.
-    @tff.federated_computation(tff.type_at_server(tf.int32))
-    def add_one(value):
-      return value + tff.federated_value(1, tff.SERVER)
+    @tff.federated_computation(tff.FederatedType(np.int32, tff.SERVER))
+    def _identity(value):
+      return value
 
     with self.assertRaises(TypeError):
-      fc.FederatedComputation(add_one, name='comp')
+      fc.FederatedComputation(_identity, name='comp')
 
   @tff.test.with_context(
       tff.backends.native.create_sync_local_cpp_execution_context

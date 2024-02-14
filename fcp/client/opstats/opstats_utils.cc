@@ -17,6 +17,7 @@
 #include "fcp/client/opstats/opstats_utils.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -26,6 +27,7 @@
 #include "google/protobuf/duration.pb.h"
 #include "google/protobuf/timestamp.pb.h"
 #include "google/protobuf/util/time_util.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/strings/string_view.h"
 #include "fcp/base/monitoring.h"
 #include "fcp/client/opstats/opstats_db.h"
@@ -141,6 +143,12 @@ OperationalStats CreateLegacyOperationalStats(
       existing_dataset_stats.set_num_examples_read(
           existing_dataset_stats.num_examples_read() +
           stats.num_examples_read());
+      if (!existing_dataset_stats.has_first_access_timestamp() ||
+          stats.first_access_timestamp() <
+              existing_dataset_stats.first_access_timestamp()) {
+        *existing_dataset_stats.mutable_first_access_timestamp() =
+            stats.first_access_timestamp();
+      }
     }
     for (const auto& event : phase_stats.events()) {
       *legacy_stats.add_events() = event;
@@ -249,6 +257,17 @@ std::optional<google::protobuf::Timestamp> GetContributionTimeForLegacyOpStats(
   return upload_started->timestamp();
 }
 
+absl::flat_hash_map<std::string, google::protobuf::Timestamp>
+GetCollectionFirstAccessTimeFromLegacyOpstats(const OperationalStats& entry) {
+  absl::flat_hash_map<std::string, google::protobuf::Timestamp>
+      collection_first_access_times;
+  for (const auto& [collection_uri, stats] : entry.dataset_stats()) {
+    collection_first_access_times[collection_uri] =
+        stats.first_access_timestamp();
+  }
+  return collection_first_access_times;
+}
+
 absl::Time GetLastUpdatedTimeFromLegacyOpStats(
     const OperationalStats& op_stats) {
   if (op_stats.events().empty()) {
@@ -269,6 +288,19 @@ std::optional<OperationalStats> GetLastSuccessfulContribution(
       legacy_op_stats, [task_name](const OperationalStats& opstats_entry) {
         return opstats_entry.task_name() == task_name;
       });
+}
+
+std::optional<absl::flat_hash_map<std::string, google::protobuf::Timestamp>>
+GetPreviousCollectionFirstAccessTimeMap(const OpStatsSequence& data,
+                                        absl::string_view task_name) {
+  std::optional<OperationalStats> last_successful_entry =
+      GetLastSuccessfulContribution(data, task_name);
+
+  if (!last_successful_entry.has_value()) {
+    return std::nullopt;
+  }
+
+  return GetCollectionFirstAccessTimeFromLegacyOpstats(*last_successful_entry);
 }
 
 std::optional<google::protobuf::Timestamp> GetLastSuccessfulContributionTime(
@@ -316,6 +348,23 @@ std::vector<OperationalStats> GetOperationalStatsForTimeRange(
     }
   }
   return selected_data;
+}
+
+std::optional<int64_t> GetLastSuccessfulContributionMinSepPolicyIndex(
+    const OpStatsSequence& data, absl::string_view task_name) {
+  std::optional<OperationalStats> last_successful_entry =
+      GetLastSuccessfulContribution(data, task_name);
+
+  // Note that it is possible that there was a successful contribution, but the
+  // opstats db got corrupted/deleted within the minimum separation period, so
+  // the client no longer has the entry indicating their last successful
+  // contribution.
+  if (!last_successful_entry.has_value() ||
+      !last_successful_entry->has_min_sep_policy_index()) {
+    return std::nullopt;
+  }
+
+  return last_successful_entry->min_sep_policy_index();
 }
 
 }  // namespace opstats

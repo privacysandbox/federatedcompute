@@ -37,6 +37,7 @@ cc_library(
         "platform.h",
     ],
     copts = FCP_COPTS,
+    visibility = ["//visibility:public"],
     deps = [
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/log:absl_log",
@@ -359,6 +360,7 @@ cc_library(
     name = "status_converters",
     srcs = ["status_converters.cc"],
     hdrs = ["status_converters.h"],
+    visibility = ["//visibility:public"],
     deps = [
         ":base",
         "@com_github_grpc_grpc//:grpc++",

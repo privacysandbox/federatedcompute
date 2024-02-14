@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@org_tensorflow//tensorflow/core/platform:build_config.bzl", "tf_proto_library")
 load("//fcp:config.bzl", "FCP_COPTS")
+load("@org_tensorflow//tensorflow/core/platform:build_config.bzl", "tf_proto_library")
 
 default_visibility = [
     "//fcp:internal",
@@ -40,6 +40,7 @@ cc_library(
         ":plan_engine_helpers",
         ":tf_wrapper",
         "//fcp/base",
+        "//fcp/client:example_iterator_query_recorder",
         "//fcp/client:histogram_counters_cc_proto",
         "//fcp/client:interfaces",
         "//fcp/client:interruptible_runner",
@@ -76,12 +77,12 @@ cc_library(
         "//fcp/aggregation/protocol:federated_compute_checkpoint_builder",
         "//fcp/base",
         "//fcp/client:converters",
+        "//fcp/client:example_iterator_query_recorder",
         "//fcp/client:example_query_result_cc_proto",
         "//fcp/client:interfaces",
         "//fcp/client:simple_task_environment",
         "//fcp/client/opstats:opstats_logger",
         "//fcp/protos:plan_cc_proto",
-        "//fcp/tensorflow:status",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -137,11 +138,15 @@ cc_library(
         "//fcp/client:diag_codes_cc_proto",
         "//fcp/client:interfaces",
         "//fcp/client:interruptible_runner",
+        "@com_google_absl//absl/memory",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
         "@com_google_protobuf//:protobuf",
         "@org_tensorflow//tensorflow/core:core_cpu",
+        "@org_tensorflow//tensorflow/core:framework",
     ],
 )
 
@@ -169,6 +174,7 @@ cc_library(
         ":example_iterator_factory",
         "//fcp/base",
         "//fcp/client:diag_codes_cc_proto",
+        "//fcp/client:example_iterator_query_recorder",
         "//fcp/client:interfaces",
         "//fcp/client:simple_task_environment",
         "//fcp/client/opstats:opstats_logger",
@@ -179,6 +185,7 @@ cc_library(
         "//fcp/tensorflow:host_object",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/time",
         "@org_tensorflow//tensorflow/core:framework",
     ],
 )
@@ -193,6 +200,8 @@ cc_library(
         "//fcp/client:interfaces",
         "//fcp/client:interruptible_runner",
         "//fcp/client:simple_task_environment",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/memory",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:str_format",
@@ -203,6 +212,7 @@ cc_library(
         "@org_tensorflow//tensorflow/lite/c:c_api_types",
         "@org_tensorflow//tensorflow/lite/delegates/flex:delegate_only_runtime",
         "@org_tensorflow//tensorflow/lite/delegates/flex:util",
+        "@org_tensorflow//tensorflow/lite/delegates/utils:simple_delegate",
         "@org_tensorflow//tensorflow/lite/kernels:builtin_ops",
     ],
 )
@@ -216,12 +226,19 @@ cc_test(
     ],
     deps = [
         ":tflite_wrapper",
+        "//fcp/base",
         "//fcp/client:interruptible_runner",
         "//fcp/client:test_helpers",
         "//fcp/testing",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest_main",
         "@org_tensorflow//tensorflow/core/kernels:string_join_op",
         "@org_tensorflow//tensorflow/core/ops:string_ops_op_lib",
+        "@org_tensorflow//tensorflow/core/platform:tstring",
     ],
 )
 
@@ -239,11 +256,12 @@ cc_library(
         ":example_iterator_factory",
         ":plan_engine_helpers",
         ":tflite_wrapper",
+        "//fcp/client:example_iterator_query_recorder",
         "//fcp/client:interfaces",
         "//fcp/client:interruptible_runner",
-        "//fcp/client:simple_task_environment",
         "//fcp/client/opstats:opstats_logger",
         "//fcp/protos:plan_cc_proto",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@org_tensorflow//tensorflow/core:framework",
         "@org_tensorflow//tensorflow/core:protos_all_cc",
     ],

@@ -18,17 +18,16 @@
 #define FCP_AGGREGATION_CORE_TENSOR_H_
 
 #include <memory>
+#include <type_traits>
 #include <utility>
 
+#include "absl/types/span.h"
 #include "fcp/aggregation/core/agg_vector.h"
 #include "fcp/aggregation/core/datatype.h"
+#include "fcp/aggregation/core/tensor.pb.h"
 #include "fcp/aggregation/core/tensor_data.h"
 #include "fcp/aggregation/core/tensor_shape.h"
 #include "fcp/base/monitoring.h"
-
-#ifndef FCP_NANOLIBC
-#include "fcp/aggregation/core/tensor.pb.h"
-#endif
 
 namespace fcp {
 namespace aggregation {
@@ -71,7 +70,6 @@ class Tensor final {
   static StatusOr<Tensor> Create(DataType dtype, TensorShape shape,
                                  std::unique_ptr<TensorData> data);
 
-#ifndef FCP_NANOLIBC
   // Creates a Tensor instance from a TensorProto.
   static StatusOr<Tensor> FromProto(const TensorProto& tensor_proto);
 
@@ -80,7 +78,6 @@ class Tensor final {
 
   // Converts Tensor to TensorProto
   TensorProto ToProto() const;
-#endif  // FCP_NANOLIBC
 
   // Validates the tensor.
   Status CheckValid() const;
@@ -109,12 +106,50 @@ class Tensor final {
     return AggVector<T>(data_.get());
   }
 
+  // Provides access to the (numerical) tensor data as a scalar. Values are
+  // automatically casted to the requested type.
+  template <typename T, typename std::enable_if<!std::is_same<
+                            string_view, T>::value>::type* = nullptr>
+  T AsScalar() const {
+    FCP_CHECK(num_elements() == 1)
+        << "AsScalar should only be used on scalar tensors";
+    T scalar_val;
+    NUMERICAL_ONLY_DTYPE_CASES(dtype_, K,
+                               scalar_val = static_cast<T>(*GetData<K>()));
+    return scalar_val;
+  }
+
+  // Provides access to the (string) tensor data as a scalar.
+  template <typename T, typename std::enable_if<std::is_same<
+                            string_view, T>::value>::type* = nullptr>
+  T AsScalar() const {
+    FCP_CHECK(num_elements() == 1)
+        << "AsScalar should only be used on scalar tensors";
+    return *GetData<T>();
+  }
+
+  // Provides access to the tensor data as a span.
+  template <typename T>
+  absl::Span<const T> AsSpan() const {
+    FCP_CHECK(internal::TypeTraits<T>::kDataType == dtype_)
+        << "Incompatible tensor dtype()";
+    return absl::Span<const T>(GetData<T>(), num_elements());
+  }
+
   // TODO(team): Add serialization functions.
 
  private:
   Tensor(DataType dtype, TensorShape shape, size_t num_elements,
          std::unique_ptr<TensorData> data)
       : dtype_(dtype), shape_(std::move(shape)), data_(std::move(data)) {}
+
+  // Returns a pointer to the tensor data.
+  template <typename T>
+  const T* GetData() const {
+    FCP_CHECK(internal::TypeTraits<T>::kDataType == dtype_)
+        << "Incompatible tensor dtype()";
+    return reinterpret_cast<const T*>(data_->data());
+  }
 
   // Tensor data type.
   DataType dtype_;

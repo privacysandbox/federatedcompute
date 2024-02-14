@@ -20,8 +20,8 @@
 #include <string>
 #include <utility>
 
-#include "fcp/aggregation/core/datatype.h"
 #include "fcp/aggregation/core/tensor_shape.h"
+#include "fcp/base/monitoring.h"
 
 namespace fcp {
 namespace aggregation {
@@ -32,8 +32,6 @@ class TensorSpec final {
   TensorSpec(std::string name, DataType dtype, TensorShape shape)
       : name_(std::move(name)), dtype_(dtype), shape_(std::move(shape)) {}
 
-  // Define a default constructor to allow for initialization of array
-  // to enable creation of a vector of TensorSpec in nanolibc.
   // A tensor spec created with the default constructor is not valid and thus
   // should not actually be used.
   TensorSpec() : name_(""), dtype_{DT_INVALID}, shape_{} {}
@@ -45,14 +43,18 @@ class TensorSpec final {
 
   bool operator!=(const TensorSpec& other) const { return !(*this == other); }
 
+  // Creates a TensorSpec instance from a TensorSpecProto.
+  static StatusOr<TensorSpec> FromProto(
+      const TensorSpecProto& tensor_spec_proto);
+
+  // Converts TensorSpec to TensorSpecProto.
+  TensorSpecProto ToProto() const;
+
   const std::string& name() const { return name_; }
   DataType dtype() const { return dtype_; }
   const TensorShape& shape() const { return shape_; }
 
  private:
-  // These fields cannot be const or else it is not possible to create a vector
-  // of TensorSpec in nanolibc due to copy or move assignment being required by
-  // the vector implementation.
   std::string name_;
   DataType dtype_;
   TensorShape shape_;

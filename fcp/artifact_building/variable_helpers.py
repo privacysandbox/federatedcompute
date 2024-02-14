@@ -54,13 +54,15 @@ def _create_var_for_tff_tensor(
   #   `tf.Variable`.
   initial_value_shape = []
   variable_shape = []
-  for shape in tff_type.shape.as_list():
+
+  for shape in tff_type.shape:
     if shape is None or shape == 0:
       initial_value_shape.append(0)
       variable_shape.append(None)
     else:
       initial_value_shape.append(shape)
       variable_shape.append(shape)
+
   return tf.Variable(
       initial_value=tf.zeros(shape=initial_value_shape, dtype=tff_type.dtype),
       name=name,
@@ -333,7 +335,6 @@ def get_grouped_input_tensor_specs_for_aggregations(
     # An intrinsic arg may be a `building_block.Selection` or a (potentially
     # nested) struct of `building_block.Selection`s. Start by creating a
     # flattened list of the `building_block.Selection`s.
-    inner_values = []
     if isinstance(value, tff.framework.Struct):
       inner_values = tff.structure.flatten(value)
     else:
@@ -436,8 +437,11 @@ def get_grouped_output_tensor_specs_for_aggregations(
   for _, local_value in aggregation_comp.result.locals:  # pytype: disable=attribute-error
     local_value.check_call()
     local_value.function.check_intrinsic()
-    local_value.type_signature.check_federated()
     assert local_value.function.intrinsic_def().aggregation_kind
+    if not isinstance(local_value.type_signature, tff.FederatedType):
+      raise ValueError(
+          f'Expected a `tff.FederatedType`, found {local_value.type_signature}.'
+      )
 
     tensor_specs = []
     # If the output is a struct, select the appropriate number of

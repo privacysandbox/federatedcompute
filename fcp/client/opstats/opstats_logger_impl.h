@@ -16,6 +16,7 @@
 #ifndef FCP_CLIENT_OPSTATS_OPSTATS_LOGGER_IMPL_H_
 #define FCP_CLIENT_OPSTATS_OPSTATS_LOGGER_IMPL_H_
 
+#include <cstdint>
 #include <string>
 
 #include "absl/container/flat_hash_map.h"
@@ -78,6 +79,9 @@ class OpStatsLoggerImpl : public OpStatsLogger {
   void SetNetworkStats(const NetworkStats& network_stats)
       ABSL_LOCKS_EXCLUDED(mutex_) override;
 
+  // Log current index of min sep policies, replacing any old stats for the run.
+  void SetMinSepPolicyIndex(int64_t current_index) override;
+
   // Sets the retry window, replacing any old retry window, in the cumulative
   // internal message. Any retry token in the retry window message is dropped.
   void SetRetryWindow(
@@ -86,10 +90,6 @@ class OpStatsLoggerImpl : public OpStatsLogger {
 
   // Get the underlying opstats database.
   OpStatsDb* GetOpStatsDb() override { return db_.get(); }
-
-  // Whether opstats is enabled. An instance of this class should only ever be
-  // created when opstats is enabled.
-  bool IsOpStatsEnabled() const override { return true; }
 
   // Syncs all logged events to storage.
   absl::Status CommitToStorage() override;

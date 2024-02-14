@@ -11,12 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for graph_helpers.py."""
 
 import collections
 
 from absl.testing import absltest
-
 import numpy as np
 import tensorflow as tf
 import tensorflow_federated as tff
@@ -45,7 +43,7 @@ class EmbedDataLogicTest(absltest.TestCase):
     with tf.Graph().as_default():
       token_placeholder, data_values, placeholders = (
           graph_helpers.embed_data_logic(
-              tff.SequenceType((tf.string)),
+              tff.SequenceType((np.str_)),
               data_spec.DataSpec(
                   plan_pb2.ExampleSelector(collection_uri='app://fake_uri')
               ),
@@ -62,8 +60,8 @@ class EmbedDataLogicTest(absltest.TestCase):
       token_placeholder, data_values, placeholders = (
           graph_helpers.embed_data_logic(
               collections.OrderedDict(
-                  A=tff.SequenceType((tf.string)),
-                  B=tff.SequenceType((tf.string)),
+                  A=tff.SequenceType((np.str_)),
+                  B=tff.SequenceType((np.str_)),
               ),  # pytype: disable=wrong-arg-types
               collections.OrderedDict(
                   A=data_spec.DataSpec(
@@ -88,7 +86,7 @@ class EmbedDataLogicTest(absltest.TestCase):
       token_placeholder, data_values, placeholders = (
           graph_helpers.embed_data_logic(
               collections.OrderedDict(
-                  A=collections.OrderedDict(B=tff.SequenceType((tf.string)))
+                  A=collections.OrderedDict(B=tff.SequenceType(np.str_))
               ),  # pytype: disable=wrong-arg-types
               collections.OrderedDict(
                   A=collections.OrderedDict(
@@ -108,7 +106,7 @@ class EmbedDataLogicTest(absltest.TestCase):
   def test_one_dataset_of_integers_without_dataspec(self):
     with tf.Graph().as_default():
       token_placeholder, data_values, placeholders = (
-          graph_helpers.embed_data_logic(tff.SequenceType((tf.string)))
+          graph_helpers.embed_data_logic(tff.SequenceType(np.str_))
       )
 
     self.assertTensorSpec(token_placeholder, 'data_token:0', [], tf.string)
@@ -122,8 +120,8 @@ class EmbedDataLogicTest(absltest.TestCase):
       token_placeholder, data_values, placeholders = (
           graph_helpers.embed_data_logic(
               collections.OrderedDict(
-                  A=tff.SequenceType((tf.string)),
-                  B=tff.SequenceType((tf.string)),
+                  A=tff.SequenceType(np.str_),
+                  B=tff.SequenceType(np.str_),
               )  # pytype: disable=wrong-arg-types
           )
       )
@@ -142,7 +140,7 @@ class EmbedDataLogicTest(absltest.TestCase):
       token_placeholder, data_values, placeholders = (
           graph_helpers.embed_data_logic(
               collections.OrderedDict(
-                  A=collections.OrderedDict(B=tff.SequenceType((tf.string)))
+                  A=collections.OrderedDict(B=tff.SequenceType(np.str_))
               )  # pytype: disable=wrong-arg-types
           )
       )
@@ -159,7 +157,7 @@ class GraphHelperTest(absltest.TestCase):
   def test_import_tensorflow(self):
     # NOTE: Minimal test for now, since this is exercised by other components,
     # just a single example with a combo of all flavors of params and results.
-    @tff.tf_computation(tff.SequenceType(tf.int64), tf.int64)
+    @tff.tf_computation(tff.SequenceType(np.int64), tf.int64)
     def work(ds, x):
       return x + 1, ds.map(lambda a: a + x)
 
@@ -180,7 +178,7 @@ class GraphHelperTest(absltest.TestCase):
   def test_import_tensorflow_with_session_token(self):
     @tff.tf_computation
     def return_value():
-      return tff.framework.get_session_token()
+      return tff.framework.get_context_stack().current.session_token  # pytype: disable=attribute-error
 
     with tf.Graph().as_default():
       x = tf.compat.v1.placeholder(dtype=tf.string)
@@ -288,7 +286,7 @@ class GraphHelperTest(absltest.TestCase):
   def test_create_tensor_map_with_non_sequence_binding_and_vars(self):
     with tf.Graph().as_default():
       vars_list = variable_helpers.create_vars_for_tff_type(
-          tff.to_type([('a', tf.int32), ('b', tf.int32)])  # pytype: disable=wrong-arg-types
+          tff.StructType([('a', np.int32), ('b', np.int32)])
       )
       init_op = tf.compat.v1.global_variables_initializer()
       assign_op = tf.group(

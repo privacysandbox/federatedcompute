@@ -16,6 +16,9 @@
 #ifndef FCP_CLIENT_PHASE_LOGGER_H_
 #define FCP_CLIENT_PHASE_LOGGER_H_
 
+#include <cstdint>
+#include <optional>
+
 #include "absl/strings/string_view.h"
 #include "fcp/client/opstats/opstats_logger.h"
 #include "fcp/client/stats.h"
@@ -99,6 +102,10 @@ class PhaseLogger {
   virtual void LogEligibilityEvalComputationInterrupted(
       absl::Status error_status, const ExampleStats& example_stats,
       absl::Time run_plan_start_time, absl::Time reference_time) = 0;
+  // Called when a native eligibility policy computation produces an error but
+  // client execution is allowed to continue.
+  virtual void LogEligibilityEvalComputationErrorNonfatal(
+      absl::Status error_status) = 0;
   // Called when the eligibility eval computation is completed.
   virtual void LogEligibilityEvalComputationCompleted(
       const ExampleStats& example_stats, absl::Time run_plan_start_time,
@@ -196,15 +203,17 @@ class PhaseLogger {
                                          const NetworkStats& network_stats,
                                          absl::Time time_before_checkin) = 0;
   // Called when check-in is completed.
-  virtual void LogCheckinCompleted(absl::string_view task_name,
-                                   const NetworkStats& network_stats,
-                                   absl::Time time_before_checkin,
-                                   absl::Time time_before_plan_download,
-                                   absl::Time reference_time) = 0;
+  virtual void LogCheckinCompleted(
+      absl::string_view task_name, const NetworkStats& network_stats,
+      absl::Time time_before_checkin, absl::Time time_before_plan_download,
+      absl::Time reference_time,
+      // The current index of MinimumSeparationPolicy that is applied to this
+      // computation execution.
+      std::optional<int64_t> min_sep_policy_index) = 0;
 
   // Computation phase.
   // Called when collection is first accessed.
-  virtual void LogCollectionFirstAccessTime(
+  virtual void MaybeLogCollectionFirstAccessTime(
       absl::string_view collection_uri) = 0;
   // Called when computation started.
   virtual void LogComputationStarted(absl::string_view task_name) = 0;

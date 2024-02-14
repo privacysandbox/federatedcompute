@@ -53,7 +53,6 @@ constexpr char kTaskName[] = "TASK";
 class OpStatsLoggerImplTest : public testing::Test {
  protected:
   void SetUp() override {
-    ON_CALL(mock_flags_, enable_opstats()).WillByDefault(Return(true));
     ON_CALL(mock_flags_, opstats_ttl_days()).WillByDefault(Return(1));
     ON_CALL(mock_flags_, opstats_db_size_limit_bytes())
         .WillByDefault(Return(1 * 1024 * 1024));
@@ -397,6 +396,34 @@ TEST_F(OpStatsLoggerImplTest, AddEventWithErrorMessage) {
   new_opstats->add_events()->set_event_type(
       OperationalStats::Event::EVENT_KIND_ERROR_TENSORFLOW);
   new_opstats->set_error_message("first error");
+
+  CheckEqualProtosAndIncreasingTimestamps(start_time, expected, *data);
+}
+
+TEST_F(OpStatsLoggerImplTest, SetMinSepPolicyIndex) {
+  auto start_time = TimeUtil::GetCurrentTime();
+  ExpectOpstatsEnabledEvents(/*num_opstats_loggers=*/1);
+
+  auto opstats_logger = CreateOpStatsLoggerImpl(kSessionName, kPopulationName);
+  opstats_logger->AddEvent(OperationalStats::Event::EVENT_KIND_CHECKIN_STARTED);
+  opstats_logger->SetMinSepPolicyIndex(1);
+
+  opstats_logger.reset();
+
+  auto db = PdsBackedOpStatsDb::Create(
+      base_dir_, mock_flags_.opstats_ttl_days() * absl::Hours(24),
+      mock_log_manager_, mock_flags_.opstats_db_size_limit_bytes());
+  ASSERT_OK(db);
+  auto data = (*db)->Read();
+  ASSERT_OK(data);
+
+  OpStatsSequence expected;
+  auto new_opstats = expected.add_opstats();
+  new_opstats->set_session_name(kSessionName);
+  new_opstats->set_population_name(kPopulationName);
+  new_opstats->set_min_sep_policy_index(1);
+  new_opstats->add_events()->set_event_type(
+      OperationalStats::Event::EVENT_KIND_CHECKIN_STARTED);
 
   CheckEqualProtosAndIncreasingTimestamps(start_time, expected, *data);
 }

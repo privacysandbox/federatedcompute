@@ -15,6 +15,8 @@
  */
 #include "fcp/client/phase_logger_impl.h"
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <tuple>
 
@@ -165,7 +167,7 @@ TEST_P(PhaseLoggerImplTest, LogCollectionFirstAccessTime) {
   EXPECT_CALL(mock_opstats_logger_,
               RecordCollectionFirstAccessTime(collection_uri, _));
 
-  phase_logger_->LogCollectionFirstAccessTime(collection_uri);
+  phase_logger_->MaybeLogCollectionFirstAccessTime(collection_uri);
 }
 
 TEST_P(PhaseLoggerImplTest, LogEligibilityEvalCheckinClientInterrupted) {
@@ -617,7 +619,46 @@ TEST_P(PhaseLoggerImplTest, LogCheckinCompleted) {
       task_name, network_stats,
       /*time_before_checkin=*/absl::Now() - absl::Minutes(2),
       /*time_before_plan_download=*/absl::Now() - absl::Minutes(1),
-      /*reference_time=*/absl::Now() - absl::Minutes(8));
+      /*reference_time=*/absl::Now() - absl::Minutes(8),
+      /*min_sep_policy_index=*/std::nullopt);
+}
+
+TEST_P(PhaseLoggerImplTest, LogCheckinCompletedWithMinSepPolicyIndex) {
+  NetworkStats network_stats{.bytes_downloaded = 100,
+                             .bytes_uploaded = 200,
+                             .network_duration = absl::Seconds(40)};
+
+  absl::Duration expected_duration = absl::Minutes(1);
+
+  std::optional<int64_t> min_sep_policy_index = 1;
+
+  std::string task_name = "my_task";
+  InSequence seq;
+  EXPECT_CALL(mock_event_publisher_,
+              PublishCheckinFinishedV2(
+                  network_stats,
+                  AllOf(Ge(expected_duration),
+                        Lt(expected_duration + absl::Milliseconds(10)))));
+  EXPECT_CALL(mock_opstats_logger_,
+              AddEvent(OperationalStats::Event::EVENT_KIND_CHECKIN_ACCEPTED));
+  EXPECT_CALL(mock_opstats_logger_, SetMinSepPolicyIndex(1));
+  EXPECT_CALL(mock_opstats_logger_, StopLoggingForTheCurrentPhase());
+  // The counter should always log the full duration, from before the start of
+  // the checkin.
+  VerifyCounterLogged(HistogramCounters::TRAINING_FL_CHECKIN_LATENCY,
+                      AllOf(Ge(absl::ToInt64Milliseconds(absl::Minutes(2))),
+                            Lt(absl::ToInt64Milliseconds(
+                                absl::Minutes(2) + absl::Milliseconds(100)))));
+  VerifyCounterLogged(HistogramCounters::TRAINING_FL_CHECKIN_END_TIME,
+                      AllOf(Ge(absl::ToInt64Milliseconds(absl::Minutes(8))),
+                            Lt(absl::ToInt64Milliseconds(
+                                absl::Minutes(8) + absl::Milliseconds(100)))));
+
+  phase_logger_->LogCheckinCompleted(
+      task_name, network_stats,
+      /*time_before_checkin=*/absl::Now() - absl::Minutes(2),
+      /*time_before_plan_download=*/absl::Now() - absl::Minutes(1),
+      /*reference_time=*/absl::Now() - absl::Minutes(8), min_sep_policy_index);
 }
 
 TEST_P(PhaseLoggerImplTest, LogComputationStarted) {
@@ -1189,6 +1230,16 @@ TEST_P(PhaseLoggerImplTest, LogMultipleTaskAssignmentsCompleted) {
   phase_logger_->LogMultipleTaskAssignmentsCompleted(
       network_stats_, absl::Now() - absl::Minutes(2),
       absl::Now() - absl::Minutes(1), absl::Now() - absl::Minutes(4));
+}
+
+TEST_P(PhaseLoggerImplTest, LogEligibilityEvalComputationErrorNonfatal) {
+  absl::Status error = absl::InternalError("oh no!");
+  EXPECT_CALL(mock_event_publisher_,
+              PublishEligibilityEvalComputationErrorNonfatal(
+                  "Error during eligibility eval computation: code: 13, error: "
+                  "oh no!"));
+
+  phase_logger_->LogEligibilityEvalComputationErrorNonfatal(error);
 }
 
 }  // namespace

@@ -16,6 +16,8 @@
 #ifndef FCP_CLIENT_PHASE_LOGGER_IMPL_H_
 #define FCP_CLIENT_PHASE_LOGGER_IMPL_H_
 
+#include <cstdint>
+#include <optional>
 #include <string>
 
 #include "absl/strings/string_view.h"
@@ -95,6 +97,8 @@ class PhaseLoggerImpl : public PhaseLogger {
   void LogEligibilityEvalComputationCompleted(
       const ExampleStats& example_stats, absl::Time run_plan_start_time,
       absl::Time reference_time) override;
+  void LogEligibilityEvalComputationErrorNonfatal(
+      absl::Status error_status) override;
 
   // Multiple task assignments phase.
   void LogMultipleTaskAssignmentsStarted() override;
@@ -157,14 +161,15 @@ class PhaseLoggerImpl : public PhaseLogger {
   void LogCheckinPlanUriReceived(absl::string_view task_name,
                                  const NetworkStats& network_stats,
                                  absl::Time time_before_checkin) override;
-  void LogCheckinCompleted(absl::string_view task_name,
-                           const NetworkStats& network_stats,
-                           absl::Time time_before_checkin,
-                           absl::Time time_before_plan_download,
-                           absl::Time reference_time) override;
+  void LogCheckinCompleted(
+      absl::string_view task_name, const NetworkStats& network_stats,
+      absl::Time time_before_checkin, absl::Time time_before_plan_download,
+      absl::Time reference_time,
+      std::optional<int64_t> min_sep_policy_index) override;
 
   // Computation phase.
-  void LogCollectionFirstAccessTime(absl::string_view collection_uri) override;
+  void MaybeLogCollectionFirstAccessTime(
+      absl::string_view collection_uri) override;
   void LogComputationStarted(absl::string_view task_name) override;
   void LogComputationInvalidArgument(absl::Status error_status,
                                      const ExampleStats& example_stats,

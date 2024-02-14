@@ -19,6 +19,7 @@
 #include <pybind11/pybind11.h>
 
 #include <cstdint>
+#include <string>
 
 #include "absl/status/status.h"
 #include "fcp/aggregation/protocol/aggregation_protocol_messages.pb.h"
@@ -33,18 +34,6 @@ namespace py = ::pybind11;
 
 using ::fcp::aggregation::AggregationProtocol;
 
-// Allow AggregationProtocol::Callback to be subclassed in Python. See
-// https://pybind11.readthedocs.io/en/stable/advanced/classes.html#overriding-virtual-functions-in-python
-class PyAggregationProtocolCallback : public AggregationProtocol::Callback {
- public:
-  void OnCloseClient(int64_t client_id,
-                     absl::Status diagnostic_status) override {
-    PYBIND11_OVERRIDE_PURE(void, AggregationProtocol::Callback, OnCloseClient,
-                           client_id,
-                           py::google::DoNotThrowStatus(diagnostic_status));
-  }
-};
-
 }  // namespace
 
 PYBIND11_MODULE(aggregation_protocol, m) {
@@ -57,15 +46,20 @@ PYBIND11_MODULE(aggregation_protocol, m) {
           .def("AddClients", &AggregationProtocol::AddClients)
           .def("ReceiveClientMessage",
                &AggregationProtocol::ReceiveClientMessage)
-          .def("CloseClient", &AggregationProtocol::CloseClient)
+          // TODO: b/319889173 - Re-enable `absl::Status` use here once the TF
+          // pybind11_abseil import issue is resolved.
+          .def("CloseClient",
+               [](AggregationProtocol* ap, int64_t client_id,
+                  const std::string& client_status_msg,
+                  int32_t client_status_code) {
+                 return ap->CloseClient(
+                     client_id,
+                     absl::Status(absl::StatusCode(client_status_code),
+                                  client_status_msg));
+               })
           .def("Complete", &AggregationProtocol::Complete)
           .def("Abort", &AggregationProtocol::Abort)
           .def("GetStatus", &AggregationProtocol::GetStatus)
-          .def("GetResult", &AggregationProtocol::GetResult);
-
-  pybind11::class_<AggregationProtocol::Callback,
-                   PyAggregationProtocolCallback>(py_aggregation_protocol,
-                                                  "Callback")
-      .def(py::init<>())
-      .def("OnCloseClient", &AggregationProtocol::Callback::OnCloseClient);
+          .def("GetResult", &AggregationProtocol::GetResult)
+          .def("PollServerMessage", &AggregationProtocol::PollServerMessage);
 }

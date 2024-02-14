@@ -94,13 +94,49 @@ maven_install(
 )
 
 http_archive(
+    name = "rules_python",
+    sha256 = "d71d2c67e0bce986e1c5a7731b4693226867c45bfe0b7c5e0067228a536fc580",
+    strip_prefix = "rules_python-0.29.0",
+    url = "https://github.com/bazelbuild/rules_python/releases/download/0.29.0/rules_python-0.29.0.tar.gz",
+)
+
+load("@rules_python//python:repositories.bzl", "py_repositories", "python_register_toolchains")
+
+py_repositories()
+
+python_register_toolchains(
+    name = "python",
+    ignore_root_user_error = True,
+    python_version = "3.9",
+)
+
+load("@python//:defs.bzl", "interpreter")
+load("@rules_python//python:pip.bzl", "package_annotation", "pip_parse")
+load("//fcp/tensorflow/pip_tf:defs.bzl", "TF_ADDITIVE_BUILD_CONTENT")
+
+pip_parse(
+    name = "pypi",
+    annotations = {
+        "tensorflow": package_annotation(
+            additive_build_content = TF_ADDITIVE_BUILD_CONTENT,
+        ),
+    },
+    python_interpreter_target = interpreter,
+    requirements_lock = "//fcp:requirements.txt",
+)
+
+load("@pypi//:requirements.bzl", "install_deps")
+
+install_deps()
+
+http_archive(
     name = "com_github_grpc_grpc",
     sha256 = "76900ab068da86378395a8e125b5cc43dfae671e09ff6462ddfef18676e2165a",
     strip_prefix = "grpc-1.50.0",
     urls = ["https://github.com/grpc/grpc/archive/refs/tags/v1.50.0.tar.gz"],
 )
 
-# TensorFlow 2.13.0 pins an old version of upb that's compatible with their old
+# TensorFlow 2.14.0 pins an old version of upb that's compatible with their old
 # version of gRPC, but not with the newer version we use. Pin the version that
 # would be added by gRPC 1.50.0.
 http_archive(
@@ -154,10 +190,9 @@ load("@com_google_api_gax_java//:repositories.bzl", "com_google_api_gax_java_rep
 
 com_google_api_gax_java_repositories()
 
-# Tensorflow v2.13.0
+# Tensorflow v2.14.0
 http_archive(
     name = "org_tensorflow",
-    patch_tool = "patch",
     patches = [
         # This patch enables googleapi Java and Python proto rules such as
         # @com_google_googleapis//google/rpc:rpc_java_proto.
@@ -166,23 +201,20 @@ http_archive(
         # download versions of LLVM pointed to by non-HEAD TensorFlow.
         # TODO(team): Remove this patch when resolved.
         "//fcp/patches:tensorflow_llvm_url.patch",
-        # TensorFlow's custom pybind11 BUILD file is missing the osx config
-        # setting expected by pybind11_bazel.
-        "//fcp/patches:tensorflow_pybind11_osx.patch",
-        # This patch removes tf_custom_op_py_library's dependency on the Bazel
-        # version of TensorFlow since for all of our Python code, we rely on a
-        # system-provided TensorFlow.
-        "//fcp/patches:tensorflow_tf_custom_op_py_library.patch",
+        # The version of googleapis imported by TensorFlow 2.14 doesn't provide
+        # `py_proto_library` targets for //google/longrunning.
+        "//fcp/patches:tensorflow_googleapis.patch",
+        # This patch replaces tf_gen_op_wrapper_py's dependency on @tensorflow
+        # with @pypi_tensorflow.
+        "//fcp/patches:tensorflow_tf_gen_op_wrapper_py.patch",
         # gRPC v1.48.0-pre1 and later include zconf.h in addition to zlib.h;
         # TensorFlow's build rule for zlib only exports the latter.
         "//fcp/patches:tensorflow_zlib.patch",
-        # Fix clang 16 build. Remove after upgrade to 2.14.
-        "//fcp/patches:tensorflow_clang16.patch",
     ],
-    sha256 = "e58c939079588623e6fa1d054aec2f90f95018266e0a970fd353a5244f5173dc",
-    strip_prefix = "tensorflow-2.13.0",
+    sha256 = "ce357fd0728f0d1b0831d1653f475591662ec5bca736a94ff789e6b1944df19f",
+    strip_prefix = "tensorflow-2.14.0",
     urls = [
-        "https://github.com/tensorflow/tensorflow/archive/v2.13.0.tar.gz",
+        "https://github.com/tensorflow/tensorflow/archive/v2.14.0.tar.gz",
     ],
 )
 
@@ -205,13 +237,6 @@ load("@org_tensorflow//tensorflow:workspace0.bzl", "tf_workspace0")
 
 tf_workspace0()
 
-load("//fcp/tensorflow/system_provided_tf:system_provided_tf.bzl", "system_provided_tf")
-
-system_provided_tf(
-    name = "system_provided_tf",
-)
-
-
 # Cpp ProtoDataStore
 http_archive(
     name = "protodatastore_cpp",
@@ -232,7 +257,6 @@ http_archive(
 # We use only the http test server.
 http_archive(
     name = "tensorflow_serving",
-    patch_tool = "patch",
     patches = [
         "//fcp/patches:tensorflow_serving.patch",
     ],
@@ -245,14 +269,67 @@ load("@tensorflow_serving//tensorflow_serving:workspace.bzl", "tf_serving_worksp
 
 tf_serving_workspace()
 
-# The version of googleapis imported by TensorFlow doesn't provide
-# `py_proto_library` targets for //google/longrunning.
-http_archive(
-    name = "googleapis_for_longrunning",
-    patches = [
-        "//fcp/patches:googleapis_longrunning.patch",
+load("@rules_jvm_external//:repositories.bzl", "rules_jvm_external_deps")
+
+rules_jvm_external_deps()
+
+load("@rules_jvm_external//:setup.bzl", "rules_jvm_external_setup")
+
+rules_jvm_external_setup()
+
+load("@rules_jvm_external//:defs.bzl", "maven_install")
+
+maven_install(
+    name = "fcp_maven",
+    artifacts = [
+        "com.google.code.findbugs:jsr305:3.0.2",
+        "com.google.errorprone:error_prone_annotations:2.11.0",
+        "com.google.guava:guava:31.0.1-jre",
+        "com.google.truth:truth:1.1.3",
+        "junit:junit:4.13",
+        "org.mockito:mockito-core:4.3.1",
     ],
-    sha256 = "c1db0b022cdfc5b5ce5f05b0f00568e2d927c9890429ec9c35bda12f52d93065",
-    strip_prefix = "googleapis-2d8030c4102f97bc6be4ddab74c7cbfe88d8c016",
-    url = "https://github.com/googleapis/googleapis/archive/2d8030c4102f97bc6be4ddab74c7cbfe88d8c016.tar.gz",
+    repositories = [
+        "https://maven.google.com",
+        "https://repo1.maven.org/maven2",
+    ],
 )
+
+http_archive(
+    name = "oak",
+    sha256 = "8bf19718abc453bea10c676178d37479bc309dc193d875e391c27853f1203c8e",
+    strip_prefix = "oak-0acf3f6dc0af2035d40884fe1258b1e0e7db5488",
+    url = "https://github.com/project-oak/oak/archive/0acf3f6dc0af2035d40884fe1258b1e0e7db5488.tar.gz",
+)
+
+http_archive(
+    name = "libcbor",
+    build_file = "//third_party:libcbor.BUILD.bzl",
+    patches = ["//fcp/patches:libcbor_configuration.patch"],
+    sha256 = "9fec8ce3071d5c7da8cda397fab5f0a17a60ca6cbaba6503a09a47056a53a4d7",
+    strip_prefix = "libcbor-0.10.2",
+    urls = ["https://github.com/PJK/libcbor/archive/refs/tags/v0.10.2.zip"],
+)
+
+# Register a clang C++ toolchain.
+http_archive(
+    name = "toolchains_llvm",
+    sha256 = "b7cd301ef7b0ece28d20d3e778697a5e3b81828393150bed04838c0c52963a01",
+    strip_prefix = "toolchains_llvm-0.10.3",
+    url = "https://github.com/grailbio/bazel-toolchain/releases/download/0.10.3/toolchains_llvm-0.10.3.tar.gz",
+)
+
+load("@toolchains_llvm//toolchain:deps.bzl", "bazel_toolchain_dependencies")
+
+bazel_toolchain_dependencies()
+
+load("@toolchains_llvm//toolchain:rules.bzl", "llvm_toolchain")
+
+llvm_toolchain(
+    name = "llvm_toolchain",
+    llvm_version = "13.0.0",
+)
+
+load("@llvm_toolchain//:toolchains.bzl", "llvm_register_toolchains")
+
+llvm_register_toolchains()

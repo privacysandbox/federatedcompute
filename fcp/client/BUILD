@@ -143,11 +143,13 @@ cc_library(
         "//fcp/protos:federated_api_cc_proto",
         "//fcp/protos:plan_cc_proto",
         "//fcp/protos:population_eligibility_spec_cc_proto",
+        "//fcp/protos/federatedcompute:federated_compute_cc_proto",
         "@com_google_absl//absl/container:btree",
         "@com_google_absl//absl/container:node_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:cord",
+        "@com_google_absl//absl/time",
     ],
 )
 
@@ -249,6 +251,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":selector_context_cc_proto",
+        ":task_result_info_cc_proto",
         "//fcp/base",
         "//fcp/client/http:http_client",
         "//fcp/protos:plan_cc_proto",
@@ -328,6 +331,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":eligibility_decider",
+        ":example_iterator_query_recorder",
         ":federated_protocol",
         ":federated_protocol_util",
         ":federated_select",
@@ -341,6 +345,7 @@ cc_library(
         ":secagg_runner",
         ":selector_context_cc_proto",
         ":simple_task_environment",
+        ":task_result_info_cc_proto",
         "//fcp/base",
         "//fcp/base:clock",
         "//fcp/client/cache:file_backed_resource_cache",
@@ -362,6 +367,7 @@ cc_library(
         "//fcp/protos:population_eligibility_spec_cc_proto",
         "//fcp/protos/federatedcompute:federated_compute_cc_proto",
         "@boringssl//:crypto",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:cord",
@@ -381,6 +387,7 @@ cc_library(
     defines = TF_OPTIONAL_DEFINES,
     visibility = ["//visibility:public"],
     deps = [
+        ":example_iterator_query_recorder",
         ":interfaces",
         ":phase_logger",
         ":phase_logger_impl",
@@ -408,9 +415,11 @@ cc_library(
     hdrs = ["eligibility_decider.h"],
     deps = [
         ":interfaces",
+        ":phase_logger",
         ":simple_task_environment",
         "//fcp/base:clock",
         "//fcp/base:time_util",
+        "//fcp/client/engine:common",
         "//fcp/client/engine:example_iterator_factory",
         "//fcp/client/opstats:opstats_utils",
         "//fcp/protos:federated_api_cc_proto",
@@ -425,21 +434,31 @@ cc_library(
         "@com_google_absl//absl/time",
         "@com_google_protobuf//:protobuf",
         "@com_googlesource_code_re2//:re2",
+        "@org_tensorflow//tensorflow/core:protos_all_cc",
     ],
 )
 
 cc_test(
-    name = "eligbility_decider_test",
+    name = "eligibility_decider_test",
     srcs = ["eligibility_decider_test.cc"],
     deps = [
+        ":diag_codes_cc_proto",
         ":eligibility_decider",
+        ":simple_task_environment",
         ":test_helpers",
         "//fcp/base:simulated_clock",
+        "//fcp/client/engine:common",
+        "//fcp/client/engine:example_iterator_factory",
+        "//fcp/protos:federated_api_cc_proto",
         "//fcp/protos:population_eligibility_spec_cc_proto",
         "//fcp/testing",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest_main",
         "@com_google_protobuf//:protobuf",
+        "@org_tensorflow//tensorflow/core:framework",
+        "@org_tensorflow//tensorflow/core/example:example_protos_cc",
     ],
 )
 
@@ -693,6 +712,34 @@ cc_test(
 )
 
 cc_library(
+    name = "example_iterator_query_recorder",
+    srcs = ["example_iterator_query_recorder.cc"],
+    hdrs = ["example_iterator_query_recorder.h"],
+    deps = [
+        ":selector_context_cc_proto",
+        ":task_result_info_cc_proto",
+        "//fcp/protos:plan_cc_proto",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_protobuf//:protobuf",
+    ],
+)
+
+cc_test(
+    name = "example_iterator_query_recorder_test",
+    srcs = ["example_iterator_query_recorder_test.cc"],
+    deps = [
+        ":example_iterator_query_recorder",
+        ":selector_context_cc_proto",
+        ":task_result_info_cc_proto",
+        "//fcp/protos:plan_cc_proto",
+        "//fcp/testing",
+        "@com_google_absl//absl/strings",
+        "@com_google_googletest//:gtest_main",
+        "@com_google_protobuf//:protobuf",
+    ],
+)
+
+cc_library(
     name = "test_helpers",
     testonly = True,
     srcs = ["test_helpers.cc"],
@@ -701,10 +748,10 @@ cc_library(
         ":federated_protocol",
         ":federated_select",
         ":interfaces",
+        ":interruptible_runner",
         ":phase_logger",
         ":secagg_runner",
         ":simple_task_environment",
-        "//fcp/base",
         "//fcp/client/engine:example_iterator_factory",
         "//fcp/client/http:http_client",
         "//fcp/client/opstats:opstats_db",
@@ -712,6 +759,7 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest_main",
         "@com_google_protobuf//:protobuf",
         "@org_tensorflow//tensorflow/core:protos_all_cc",
@@ -731,6 +779,10 @@ java_proto_library(
 
 cc_proto_library(
     name = "histogram_counters_cc_proto",
+    visibility = [
+        "//assistant/ondevice/federated/plan_engine:__pkg__",
+        "//fcp:internal",
+    ],
     deps = [":histogram_counters_proto"],
 )
 
@@ -771,6 +823,10 @@ java_proto_library(
 
 cc_proto_library(
     name = "diag_codes_cc_proto",
+    visibility = [
+        "//assistant/ondevice/federated/plan_engine:__pkg__",
+        "//fcp:internal",
+    ],
     deps = [":diag_codes_proto"],
 )
 
@@ -800,6 +856,7 @@ proto_library(
     name = "selector_context_proto",
     srcs = ["selector_context.proto"],
     deps = [
+        "@com_google_protobuf//:any_proto",
         "@com_google_protobuf//:timestamp_proto",
     ],
 )
@@ -822,6 +879,7 @@ java_proto_library(
 proto_library(
     name = "example_query_result_proto",
     srcs = ["example_query_result.proto"],
+    visibility = ["//visibility:public"],
 )
 
 java_proto_library(
@@ -831,5 +889,23 @@ java_proto_library(
 
 cc_proto_library(
     name = "example_query_result_cc_proto",
+    visibility = ["//visibility:public"],
     deps = [":example_query_result_proto"],
+)
+
+# --------------------------------------------------------------------
+# task_result_info.proto
+
+proto_library(
+    name = "task_result_info_proto",
+    srcs = ["task_result_info.proto"],
+    deps = [
+        ":selector_context_proto",
+        "@com_google_protobuf//:any_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "task_result_info_cc_proto",
+    deps = [":task_result_info_proto"],
 )
