@@ -25,7 +25,9 @@ java_library(
         "TensorflowPlanSession.java",
     ],
     deps = [
-        "//fcp/java_src/main/java/com/google/fcp/tensorflow",
+        "//fcp/java_src/main/java/com/google/fcp/tensorflow:tensorflow",
+        "//fcp/java_src/main/java/com/google/fcp/tensorflow:app_files",
+        "//fcp/java_src/main/java/com/google/fcp/tensorflow:file_util",
         "//fcp/java_src/main/java/com/google/fcp/tensorflow:protos_all_java_proto",
         "//fcp/protos:plan_java_proto",
         "@com_google_protobuf//java/core",

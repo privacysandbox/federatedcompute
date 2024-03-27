@@ -36,7 +36,7 @@ import org.tensorflow.framework.TensorProto;
 
 class TensorflowPhaseSession implements PhaseSession {
 
-  private static final AppFiles fileCache = new AppFiles("/tmp");
+  private final AppFiles fileCache;
 
   // Deeply-immutable values
   private final TensorflowPlanSession planSession;
@@ -51,8 +51,8 @@ class TensorflowPhaseSession implements PhaseSession {
   private boolean hasAccumulated;
 
   TensorflowPhaseSession(
-      TensorflowPlanSession planSession, byte[] serverGraph, ByteString checkpoint) {
-    this(planSession, serverGraph);
+      TensorflowPlanSession planSession, byte[] serverGraph, ByteString checkpoint, AppFiles fileCache) {
+    this(planSession, serverGraph, fileCache);
     checkNotNull(checkpoint);
     checkArgument(!checkpoint.isEmpty());
 
@@ -65,8 +65,9 @@ class TensorflowPhaseSession implements PhaseSession {
   }
 
   TensorflowPhaseSession(
-      TensorflowPlanSession planSession, byte[] serverGraph) {
+      TensorflowPlanSession planSession, byte[] serverGraph, AppFiles fileCache) {
     this.planSession = checkNotNull(planSession);
+    this.fileCache = fileCache;
     checkNotNull(serverGraph);
 
     try {

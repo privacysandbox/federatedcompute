@@ -15,6 +15,7 @@ package com.google.fcp.plan;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
+import com.google.fcp.tensorflow.AppFiles;
 import com.google.internal.federated.plan.CheckpointOp;
 import com.google.internal.federated.plan.OutputMetric;
 import com.google.internal.federated.plan.Plan;
@@ -113,7 +114,7 @@ public final class TensorflowPlanSession implements PlanSession {
     return this.phase.getServerPhase();
   }
 
-  public PhaseSession createPhaseSession(Optional<ByteString> checkpoint) {
+  public PhaseSession createPhaseSession(Optional<ByteString> checkpoint, Optional<AppFiles> appFiles) {
     if (serverGraph == null) {
       throw new IllegalStateException(
           "Cannot create more than one phase session. Has createPhaseSession been called already?");
@@ -122,11 +123,12 @@ public final class TensorflowPlanSession implements PlanSession {
       throw new IllegalStateException("The plan does not have a ServerPhase.");
     }
 
+    AppFiles fileCache = appFiles.orElse(new AppFiles("/tmp"));
     TensorflowPhaseSession phaseSession;
     if (checkpoint.isEmpty()) {
-      phaseSession = new TensorflowPhaseSession(this, serverGraph);
+      phaseSession = new TensorflowPhaseSession(this, serverGraph, fileCache);
     } else {
-      phaseSession = new TensorflowPhaseSession(this, serverGraph, checkpoint.get());
+      phaseSession = new TensorflowPhaseSession(this, serverGraph, checkpoint.get(), fileCache);
     }
 
 

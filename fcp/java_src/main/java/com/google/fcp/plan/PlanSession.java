@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.fcp.plan;
 
+import com.google.fcp.tensorflow.AppFiles;
 import com.google.internal.federated.plan.OutputMetric;
 import com.google.internal.federated.plan.ServerPhase;
 import com.google.protobuf.ByteString;
@@ -42,7 +43,7 @@ public interface PlanSession {
    * @throws {@link IllegalStateException} if a phase session has already been created or a
    *     ServerPhase does not exist.
    */
-  PhaseSession createPhaseSession(Optional<ByteString> checkpoint);
+  PhaseSession createPhaseSession(Optional<ByteString> checkpoint, Optional<AppFiles> appFiles);
 
   /**
    * Retrieves the plan's server phase, which represents the plan for aggregating multiple client

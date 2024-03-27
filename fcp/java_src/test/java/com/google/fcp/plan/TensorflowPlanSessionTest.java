@@ -16,6 +16,7 @@ package com.google.fcp.plan;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertNotNull;
 
+import com.google.fcp.tensorflow.AppFiles;
 import com.google.protobuf.ByteString;
 import java.util.Map;
 import java.util.Optional;
@@ -38,7 +39,7 @@ public class TensorflowPlanSessionTest {
 
     // Create tensorflow session
     PlanSession planSession = new TensorflowPlanSession(plan);
-    PhaseSession phaseSession = planSession.createPhaseSession(Optional.empty());
+    PhaseSession phaseSession = planSession.createPhaseSession(Optional.empty(), Optional.empty());
 
     // Perform aggregation with gradient
     phaseSession.accumulateClientUpdate(gradient);
@@ -53,7 +54,64 @@ public class TensorflowPlanSessionTest {
 
     // Create tensorflow session
     PlanSession updateSession = new TensorflowPlanSession(plan);
-    PhaseSession updatePhaseSession = updateSession.createPhaseSession(Optional.of(checkpoint));
+    PhaseSession updatePhaseSession = updateSession.createPhaseSession(Optional.of(checkpoint), Optional.empty());
+
+    // Apply update
+    updatePhaseSession.accumulateIntermediateUpdate(result);
+    updatePhaseSession.applyAggregatedUpdates();
+    ByteString newCheckpoint = updatePhaseSession.toCheckpoint();
+
+    // Produce Metrics
+    Map<String, Double> metrics = updatePhaseSession.getMetrics();
+    assertNotNull(metrics.get("server/client_work/train/binary_accuracy"));
+    assertNotNull(metrics.get("server/client_work/train/binary_crossentropy"));
+    assertNotNull(metrics.get("server/client_work/train/recall"));
+    assertNotNull(metrics.get("server/client_work/train/precision"));
+    assertNotNull(metrics.get("server/client_work/train/auc-roc"));
+    assertNotNull(metrics.get("server/client_work/train/auc-pr"));
+
+    // Produce server checkpoint
+    assertArrayEquals(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/expected_checkpoint.ckp")
+            .readAllBytes(), newCheckpoint.toByteArray());
+
+    // Produce client checkpoint
+    assertNotNull(updatePhaseSession.getClientCheckpoint(Optional.empty()));
+
+    // Clean native resources
+    updatePhaseSession.close();
+    phaseSession.close();
+  }
+
+  @Test
+  public void testCreatePhaseSessionSingleGradientDevShm() throws Exception {
+    ByteString checkpoint = ByteString.copyFrom(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/init_checkpoint.ckp")
+            .readAllBytes());
+    ByteString gradient = ByteString.copyFrom(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/gradient.ckp").readAllBytes());
+    ByteString plan = ByteString.copyFrom(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/plan.pb").readAllBytes());
+
+    // Create tensorflow session
+    PlanSession planSession = new TensorflowPlanSession(plan);
+    PhaseSession phaseSession = planSession.createPhaseSession(Optional.empty(), Optional.of(new AppFiles("/dev/shm")));
+
+    // Perform aggregation with gradient
+    phaseSession.accumulateClientUpdate(gradient);
+
+    // Finalize aggregation
+    ByteString result = phaseSession.toIntermediateUpdate();
+
+    // Assert result
+    assertArrayEquals(
+        getClass().getResourceAsStream("/com/google/fcp/testdata/intermediate_checkpoint.ckp")
+            .readAllBytes(), result.toByteArray());
+
+    // Create tensorflow session
+    PlanSession updateSession = new TensorflowPlanSession(plan);
+    PhaseSession updatePhaseSession = updateSession.createPhaseSession(Optional.of(checkpoint),
+        Optional.of(new AppFiles("/dev/shm")));
 
     // Apply update
     updatePhaseSession.accumulateIntermediateUpdate(result);
@@ -94,7 +152,7 @@ public class TensorflowPlanSessionTest {
 
     // Create tensorflow session
     PlanSession planSession = new TensorflowPlanSession(plan);
-    PhaseSession phaseSession = planSession.createPhaseSession(Optional.of(checkpoint));
+    PhaseSession phaseSession = planSession.createPhaseSession(Optional.of(checkpoint), Optional.empty());
 
     // Perform aggregation with gradient
     phaseSession.accumulateClientUpdate(gradient);
@@ -150,7 +208,7 @@ public class TensorflowPlanSessionTest {
 
     // Create tensorflow session
     PlanSession planSession = new TensorflowPlanSession(plan);
-    PhaseSession phaseSession = planSession.createPhaseSession(Optional.of(checkpoint));
+    PhaseSession phaseSession = planSession.createPhaseSession(Optional.of(checkpoint), Optional.empty());
 
     // Perform aggregation with gradient
     for (int i = 0; i < 10; i++) {

@@ -21,6 +21,7 @@ java_test(
     resources = ["//fcp/java_src/test/java/com/google/fcp/testdata"],
     deps = [
         "//fcp/java_src/main/java/com/google/fcp/plan",
+        "//fcp/java_src/main/java/com/google/fcp/tensorflow:app_files",
         "@com_google_protobuf//java/core",
         "@maven//:com_google_guava_guava",
         "@maven//:com_google_truth_truth",

@@ -20,8 +20,6 @@ package(
 java_library(
     name = "tensorflow",
     srcs = [
-        "AppFiles.java",
-        "FileUtil.java",
         "NativeHandle.java",
         "TensorflowException.java",
         "TensorflowSession.java",
@@ -30,11 +28,27 @@ java_library(
         "//fcp/java_src/main/java/com/google/fcp/tensorflow/jni:libtensorflow-jni.so",
     ],
     deps = [
+        ":app_files",
+        ":file_util",
         ":protos_all_java_proto",
         "//fcp/protos:plan_java_proto",
         "@com_google_protobuf//java/core",
         "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
+    ],
+)
+
+java_library(
+    name = "app_files",
+    srcs = ["AppFiles.java"],
+    deps = [],
+)
+
+java_library(
+    name = "file_util",
+    srcs = ["FileUtil.java"],
+    deps = [
+        "@com_google_protobuf//java/core",
     ],
 )
 
