@@ -17,6 +17,7 @@
 #define FCP_CLIENT_FLAGS_H_
 
 #include <cstdint>
+#include <vector>
 
 #include "absl/status/status.h"
 
@@ -190,18 +191,6 @@ class Flags {
     return false;
   }
 
-  // If true, enables support for native computation of Eligibility Eval Tasks.
-  virtual bool enable_native_eets() const { return false; }
-
-  // If true, enables support for TensorFlow custom policies in the native
-  // Eligibility Eval stack.
-  virtual bool neet_tf_custom_policy_support() const { return false; }
-
-  // If true, failing to evaluate an eligibility policy will opt the device out
-  // of tasks using that policy instead of halting execution. Requires
-  // neet_tf_custom_policy_support.
-  virtual bool graceful_eligibility_policy_failure() const { return false; }
-
   // If true, enables new client report wire format for lightweight client.
   virtual bool enable_lightweight_client_report_wire_format() const {
     return false;
@@ -247,9 +236,12 @@ class Flags {
   // TFLite's intended invocation patter.
   virtual bool use_thread_safe_tflite_wrapper() const { return false; }
 
-  // If true, the client will not create an output checkpoint temp file for
-  // tasks that do not use any output checkpoints.
-  virtual bool skip_empty_output_checkpoints() const { return false; }
+  // If true, the client will generate computation IDs by actually calculating a
+  // SHA256 hash correctly, whereas it calculated the hash only over the first 4
+  // bytes before this change.
+  virtual bool use_correct_sha256_impl_for_computation_id() const {
+    return false;
+  }
 };
 }  // namespace client
 }  // namespace fcp

@@ -17,28 +17,29 @@ package(
 )
 
 cc_library(
-    name = "cbor_utils",
-    srcs = ["cbor_utils.cc"],
-    hdrs = ["cbor_utils.h"],
-    visibility = ["//visibility:private"],
+    name = "client_payload",
+    srcs = ["client_payload.cc"],
+    hdrs = ["client_payload.h"],
+    visibility = ["//visibility:public"],
     deps = [
+        "//fcp/protos/confidentialcompute:aggregation_client_payload_cc_proto",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "@libcbor//:cbor",
+        "@com_google_absl//absl/strings",
+        "@com_google_protobuf//:protobuf",
     ],
 )
 
 cc_test(
-    name = "cbor_utils_test",
-    srcs = ["cbor_utils_test.cc"],
+    name = "client_payload_test",
+    srcs = ["client_payload_test.cc"],
     deps = [
-        ":cbor_utils",
+        ":client_payload",
         "//fcp/testing",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest_main",
-        "@libcbor//:cbor",
     ],
 )
 
@@ -48,13 +49,13 @@ cc_library(
     hdrs = ["cose.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":cbor_utils",
         "//fcp/base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/time",
-        "@libcbor//:cbor",
+        "@com_google_protobuf//:protobuf",
+        "@libcppbor",
     ],
 )
 
@@ -69,6 +70,7 @@ cc_test(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest_main",
+        "@com_google_protobuf//:protobuf",
     ],
 )
 
@@ -80,12 +82,14 @@ cc_library(
     deps = [
         ":cose",
         "//fcp/base",
+        "//fcp/base:digest",
         "@boringssl//:crypto",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/functional:function_ref",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+        "@com_google_protobuf//:protobuf",
     ],
 )
 
@@ -103,5 +107,6 @@ cc_test(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest_main",
+        "@com_google_protobuf//:protobuf",
     ],
 )

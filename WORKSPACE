@@ -43,6 +43,7 @@
 
 workspace(name = "com_google_fcp")
 
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 # Needed for user-defined configs
@@ -128,6 +129,16 @@ pip_parse(
 load("@pypi//:requirements.bzl", "install_deps")
 
 install_deps()
+
+# Use a newer version of BoringSSL than what TF gives us, so we can use
+# functions like `EC_group_p256` (which was added in commit
+# 417069f8b2fd6dd4f8c2f5f69de7c038a2397050).
+http_archive(
+    name = "boringssl",
+    sha256 = "5d6be8b65198828b151e7e4a83c3e4d76b892c43c3fb01c63f03de62b420b70f",
+    strip_prefix = "boringssl-47e850c41f43350699e1325a134ec88269cabe6b",
+    urls = ["https://github.com/google/boringssl/archive/47e850c41f43350699e1325a134ec88269cabe6b.tar.gz"],
+)
 
 http_archive(
     name = "com_github_grpc_grpc",
@@ -297,18 +308,16 @@ maven_install(
 
 http_archive(
     name = "oak",
-    sha256 = "8bf19718abc453bea10c676178d37479bc309dc193d875e391c27853f1203c8e",
-    strip_prefix = "oak-0acf3f6dc0af2035d40884fe1258b1e0e7db5488",
-    url = "https://github.com/project-oak/oak/archive/0acf3f6dc0af2035d40884fe1258b1e0e7db5488.tar.gz",
+    sha256 = "4c3bbe95d02149f63a95a845221af12ebe566f0885bb5cfbb38dec6f6b3cbd42",
+    strip_prefix = "oak-bcd41441c25be5cfee9811e9cd5912c2f8519b8e",
+    url = "https://github.com/project-oak/oak/archive/bcd41441c25be5cfee9811e9cd5912c2f8519b8e.tar.gz",
 )
 
-http_archive(
-    name = "libcbor",
-    build_file = "//third_party:libcbor.BUILD.bzl",
-    patches = ["//fcp/patches:libcbor_configuration.patch"],
-    sha256 = "9fec8ce3071d5c7da8cda397fab5f0a17a60ca6cbaba6503a09a47056a53a4d7",
-    strip_prefix = "libcbor-0.10.2",
-    urls = ["https://github.com/PJK/libcbor/archive/refs/tags/v0.10.2.zip"],
+git_repository(
+    name = "libcppbor",
+    build_file = "//third_party:libcppbor.BUILD.bzl",
+    commit = "20d2be8672d24bfb441d075f82cc317d17d601f8",
+    remote = "https://android.googlesource.com/platform/external/libcppbor",
 )
 
 # Register a clang C++ toolchain.

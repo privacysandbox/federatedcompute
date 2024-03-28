@@ -17,19 +17,21 @@
 #include "fcp/client/eligibility_decider.h"
 
 #include <cstdint>
-#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "google/protobuf/duration.pb.h"
+#include "google/protobuf/timestamp.pb.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
+#include "fcp/base/clock.h"
+#include "fcp/base/monitoring.h"
 #include "fcp/base/time_util.h"
 #include "fcp/client/engine/common.h"
 #include "fcp/client/engine/example_iterator_factory.h"
@@ -349,10 +351,7 @@ absl::StatusOr<TaskEligibilityInfo> ComputeEligibility(
     LogManager& log_manager, PhaseLogger& phase_logger,
     const opstats::OpStatsSequence& opstats_sequence, Clock& clock,
     std::vector<engine::ExampleIteratorFactory*> example_iterator_factories,
-    bool neet_tf_custom_policy_support, EetPlanRunner& eet_plan_runner,
-    const Flags* flags) {
-  bool graceful_eligibility_policy_failure =
-      flags->graceful_eligibility_policy_failure();
+    EetPlanRunner& eet_plan_runner, const Flags* flags) {
   // Initialize the TaskEligibilityInfo to return. If eligibility cannot be
   // decided, i.e. due to insufficient implementations, we'll return this
   // unfilled.
@@ -381,57 +380,30 @@ absl::StatusOr<TaskEligibilityInfo> ComputeEligibility(
       case EligibilityPolicyEvalSpec::PolicyTypeCase::kDataAvailabilityPolicy:
         if (kDataAvailabilityImplementationVersion <
             policy_spec.min_version()) {
-          if (graceful_eligibility_policy_failure) {
-            policy_implemented = false;
-          } else {
-            return eligibility_result;
-          }
+          policy_implemented = false;
         }
         break;
       case EligibilityPolicyEvalSpec::PolicyTypeCase::kSworPolicy:
         if (kSworImplementationVersion < policy_spec.min_version()) {
-          if (graceful_eligibility_policy_failure) {
-            policy_implemented = false;
-          } else {
-            return eligibility_result;
-          }
+          policy_implemented = false;
         }
         break;
       case EligibilityPolicyEvalSpec::PolicyTypeCase::kTfCustomPolicy:
-        if (!neet_tf_custom_policy_support) {
-          // graceful_eligibility_policy_failure requires
-          // neet_tf_custom_policy_support to be true.
-          return eligibility_result;
-        }
         if (kTfCustomPolicyImplementationVersion < policy_spec.min_version()) {
-          if (graceful_eligibility_policy_failure) {
             policy_implemented = false;
-          } else {
-            return eligibility_result;
-          }
         }
         break;
       case EligibilityPolicyEvalSpec::PolicyTypeCase::kMinSepPolicy:
         if (kMinimumSeparationPolicyImplementationVersion <
             policy_spec.min_version()) {
-          if (graceful_eligibility_policy_failure) {
             policy_implemented = false;
-          } else {
-            return eligibility_result;
-          }
         }
         break;
       default:
         // Unknown or unset policy type! This can happen if a new policy type
         // has been added on the server, but is not yet implemented in the
         // client.
-        if (graceful_eligibility_policy_failure) {
           policy_implemented = false;
-        } else {
-          log_manager.LogDiag(
-              ProdDiagCode::ELIGIBILITY_EVAL_UNEXPECTED_POLICY_KIND);
-          return eligibility_result;
-        }
     }
 
     absl::flat_hash_set<std::string> task_names;
@@ -465,8 +437,7 @@ absl::StatusOr<TaskEligibilityInfo> ComputeEligibility(
   }
 
   // If we have any task names that use unimplemented policies, remove them from
-  // eligible_tasks. Note that task_names_using_unimplemented_policies can only
-  // be nonempty if graceful_eligibility_policy_failure is true.
+  // eligible_tasks.
   if (!task_names_using_unimplemented_policies.empty()) {
     absl::erase_if(eligible_tasks, [&task_names_using_unimplemented_policies](
                                        const std::string& task_name) {
@@ -537,15 +508,11 @@ absl::StatusOr<TaskEligibilityInfo> ComputeEligibility(
             }
             // No tasks are eligible, so leave eligible_policy_task_names empty.
           } else {
-            if (graceful_eligibility_policy_failure) {
-              phase_logger.LogEligibilityEvalComputationErrorNonfatal(
-                  data_is_available.status());
-              // No tasks are eligible, so leave eligible_policy_task_names
-              // empty. Below, we'll remove them from the overall eligible
-              // tasks.
-            } else {
-              return data_is_available.status();
-            }
+            phase_logger.LogEligibilityEvalComputationErrorNonfatal(
+                data_is_available.status());
+            // No tasks are eligible, so leave eligible_policy_task_names
+            // empty. Below, we'll remove them from the overall eligible
+            // tasks.
           }
         }
         break;
@@ -557,14 +524,10 @@ absl::StatusOr<TaskEligibilityInfo> ComputeEligibility(
         if (tf_policy_task_names.ok()) {
           eligible_policy_task_names = *tf_policy_task_names;
         } else {
-          if (graceful_eligibility_policy_failure) {
-            phase_logger.LogEligibilityEvalComputationErrorNonfatal(
-                tf_policy_task_names.status());
-            // No tasks are eligible, so leave eligible_policy_task_names empty.
-            // Below, we'll remove them from the overall eligible tasks.
-          } else {
-            return tf_policy_task_names.status();
-          }
+          phase_logger.LogEligibilityEvalComputationErrorNonfatal(
+              tf_policy_task_names.status());
+          // No tasks are eligible, so leave eligible_policy_task_names empty.
+          // Below, we'll remove them from the overall eligible tasks.
         }
       } break;
       case EligibilityPolicyEvalSpec::PolicyTypeCase::kMinSepPolicy: {

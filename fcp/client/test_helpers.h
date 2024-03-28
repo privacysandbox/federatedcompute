@@ -30,13 +30,18 @@
 #include "gmock/gmock.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/cord.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
+#include "fcp/client/attestation/attestation_verifier.h"
+#include "fcp/client/diag_codes.pb.h"
+#include "fcp/client/engine/engine.pb.h"
 #include "fcp/client/engine/example_iterator_factory.h"
 #include "fcp/client/event_publisher.h"
 #include "fcp/client/federated_protocol.h"
 #include "fcp/client/federated_select.h"
 #include "fcp/client/flags.h"
+#include "fcp/client/histogram_counters.pb.h"
 #include "fcp/client/http/http_client.h"
 #include "fcp/client/interruptible_runner.h"
 #include "fcp/client/log_manager.h"
@@ -45,8 +50,17 @@
 #include "fcp/client/phase_logger.h"
 #include "fcp/client/secagg_event_publisher.h"
 #include "fcp/client/secagg_runner.h"
+#include "fcp/client/selector_context.pb.h"
 #include "fcp/client/simple_task_environment.h"
 #include "fcp/client/stats.h"
+#include "fcp/client/task_result_info.pb.h"
+#include "fcp/confidentialcompute/cose.h"
+#include "fcp/protos/federated_api.pb.h"
+#include "fcp/protos/federatedcompute/confidential_aggregations.pb.h"
+#include "fcp/protos/opstats.pb.h"
+#include "fcp/protos/plan.pb.h"
+#include "fcp/protos/population_eligibility_spec.pb.h"
+#include "fcp/secagg/shared/secagg_messages.pb.h"
 #include "google/protobuf/repeated_ptr_field.h"
 #include "tensorflow/core/example/example.pb.h"
 #include "tensorflow/core/example/feature.pb.h"
@@ -495,17 +509,6 @@ class MockFederatedProtocol : public FederatedProtocol {
               (ComputationResults results, absl::Duration plan_duration,
                std::optional<std::string> aggregation_session_id));
 
-  absl::Status ReportViaConfidentialAggregation(
-      const google::internal::federatedcompute::v1::TaskAssignment::
-          ConfidentialAggregationInfo& agg_info,
-      ComputationResults results, absl::Duration plan_duration,
-      std::optional<std::string> aggregation_session_id) final {
-    return absl::UnimplementedError("");
-  };
-  MOCK_METHOD(absl::Status, MockReportViaConfidentialAggregation,
-              (ComputationResults results, absl::Duration plan_duration,
-               std::optional<std::string> aggregation_session_id));
-
   absl::Status ReportNotCompleted(
       engine::PhaseOutcome phase_outcome, absl::Duration plan_duration,
       std::optional<std::string> aggregation_session_id) final {
@@ -671,7 +674,6 @@ class MockFlags : public Flags {
   MOCK_METHOD(bool, enable_example_query_plan_engine, (), (const, override));
   MOCK_METHOD(bool, http_protocol_supports_multiple_task_assignments, (),
               (const, override));
-  MOCK_METHOD(bool, enable_native_eets, (), (const, override));
   MOCK_METHOD(bool, enable_phase_stats_logging, (), (const, override));
   MOCK_METHOD(bool, enable_lightweight_client_report_wire_format, (),
               (const, override));
@@ -682,9 +684,7 @@ class MockFlags : public Flags {
               (const, override));
   MOCK_METHOD(bool, enable_confidential_aggregation, (), (const, override));
   MOCK_METHOD(bool, enable_minimum_separation_policy, (), (const, override));
-  MOCK_METHOD(bool, graceful_eligibility_policy_failure, (), (const, override));
   MOCK_METHOD(bool, use_thread_safe_tflite_wrapper, (), (const, override));
-  MOCK_METHOD(bool, skip_empty_output_checkpoints, (), (const, override));
 };
 
 // Helper methods for extracting opstats fields from TF examples.
@@ -979,6 +979,15 @@ class MockSecAggProtocolDelegate : public SecAggProtocolDelegate {
   MOCK_METHOD(absl::StatusOr<secagg::ServerToClientWrapperMessage>,
               ReceiveServerMessage, (), (override));
   MOCK_METHOD(void, Abort, (), (override));
+};
+
+class MockAttestationVerifier : public attestation::AttestationVerifier {
+ public:
+  MOCK_METHOD(absl::StatusOr<fcp::confidential_compute::OkpKey>, Verify,
+              (const absl::Cord& access_policy,
+               const google::internal::federatedcompute::v1::
+                   ConfidentialEncryptionConfig& encryption_config),
+              (override));
 };
 
 }  // namespace client

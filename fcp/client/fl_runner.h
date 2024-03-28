@@ -16,11 +16,13 @@
 #ifndef FCP_CLIENT_FL_RUNNER_H_
 #define FCP_CLIENT_FL_RUNNER_H_
 
+#include <optional>
 #include <string>
 
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
+#include "absl/time/time.h"
 #include "fcp/base/clock.h"
-#include "fcp/base/monitoring.h"
 #include "fcp/client/engine/engine.pb.h"
 #include "fcp/client/event_publisher.h"
 #include "fcp/client/federated_protocol.h"
@@ -28,14 +30,13 @@
 #include "fcp/client/files.h"
 #include "fcp/client/fl_runner.pb.h"
 #include "fcp/client/flags.h"
-#include "fcp/client/http/http_client.h"
 #include "fcp/client/interruptible_runner.h"
 #include "fcp/client/log_manager.h"
 #include "fcp/client/opstats/opstats_logger.h"
 #include "fcp/client/phase_logger.h"
 #include "fcp/client/simple_task_environment.h"
 #include "fcp/protos/plan.pb.h"
-#include "tensorflow/core/framework/tensor.h"
+#include "fcp/protos/population_eligibility_spec.pb.h"
 
 namespace fcp {
 namespace client {
@@ -70,9 +71,8 @@ inline constexpr absl::string_view kFederatedComputeCheckpoint =
 //     to serve versioned computations - that is, versions of a computation that
 //     have been tested and found to be compatible with this device's version -
 //     or reject the device.
-// - attestation_measurement: An opaque string from a "measurement" that can be
-// used
-//     by the server to attest the device integrity.
+// - client_attestation_measurement: An opaque string from a "measurement" that
+//     can be used by the server to attest the device integrity.
 //
 // Returns:
 // On success, the returned FLRunnerResult contains information on when the
@@ -84,7 +84,7 @@ absl::StatusOr<FLRunnerResult> RunFederatedComputation(
     const std::string& test_cert_path, const std::string& session_name,
     const std::string& population_name, const std::string& retry_token,
     const std::string& client_version,
-    const std::string& attestation_measurement);
+    const std::string& client_attestation_measurement);
 
 // This is exposed for use in tests that require a mocked FederatedProtocol and
 // OpStatsLogger. Otherwise, this is used internally by the other
@@ -108,7 +108,10 @@ FLRunnerTensorflowSpecResult RunPlanWithTensorflowSpecForTesting(
     const google::internal::federated::plan::ClientOnlyPlan& client_plan,
     const std::string& checkpoint_input_filename,
     const fcp::client::InterruptibleRunner::TimingConfig& timing_config,
-    const absl::Time run_plan_start_time, const absl::Time reference_time);
+    absl::Time run_plan_start_time, absl::Time reference_time,
+    std::optional<
+        ::google::internal::federated::plan::PopulationEligibilitySpec>
+        population_eligibility_spec);
 
 }  // namespace client
 }  // namespace fcp

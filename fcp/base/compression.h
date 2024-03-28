@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,16 +14,20 @@
  * limitations under the License.
  */
 
-#ifndef FCP_BASE_NEW_H_
-#define FCP_BASE_NEW_H_
+#ifndef FCP_BASE_COMPRESION_H_
+#define FCP_BASE_COMPRESION_H_
 
-#ifdef FCP_NANOLIBC
-// Definitions of placement operator new are needed because nanolibc doesn't
-// currently have the <new> header.
-inline void* operator new(size_t, void* p) noexcept { return p; }
-inline void* operator new[](size_t, void* p) noexcept { return p; }
-#else
-#include <new>
-#endif  // FCP_NANOLIBC
+#include "absl/status/statusor.h"
+#include "absl/strings/cord.h"
+#include "absl/strings/string_view.h"
 
-#endif  // FCP_BASE_NEW_H_
+namespace fcp {
+
+absl::StatusOr<std::string> CompressWithGzip(
+    absl::string_view uncompressed_data);
+absl::StatusOr<absl::Cord> UncompressWithGzip(
+    absl::string_view compressed_data);
+
+}  // namespace fcp
+
+#endif  // FCP_BASE_COMPRESION_H_

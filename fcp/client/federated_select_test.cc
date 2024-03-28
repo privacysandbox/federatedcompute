@@ -15,6 +15,7 @@
  */
 #include "fcp/client/federated_select.h"
 
+#include <cstdint>
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -22,20 +23,20 @@
 #include <vector>
 
 #include "google/protobuf/any.pb.h"
-#include "google/protobuf/text_format.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "absl/status/status.h"
-#include "absl/synchronization/blocking_counter.h"
+#include "absl/status/statusor.h"
 #include "absl/time/time.h"
+#include "fcp/base/compression.h"
 #include "fcp/base/monitoring.h"
 #include "fcp/client/client_runner.h"
 #include "fcp/client/diag_codes.pb.h"
 #include "fcp/client/engine/example_iterator_factory.h"
 #include "fcp/client/http/http_client.h"
-#include "fcp/client/http/in_memory_request_response.h"
 #include "fcp/client/http/testing/test_helpers.h"
 #include "fcp/client/interruptible_runner.h"
+#include "fcp/client/simple_task_environment.h"
 #include "fcp/client/stats.h"
 #include "fcp/client/test_helpers.h"
 #include "fcp/protos/plan.pb.h"
@@ -44,6 +45,7 @@
 namespace fcp::client {
 namespace {
 
+using ::fcp::CompressWithGzip;
 using ::fcp::IsCode;
 using ::fcp::client::ExampleIterator;
 using ::fcp::client::engine::ExampleIteratorFactory;
@@ -53,7 +55,6 @@ using ::fcp::client::http::HttpRequest;
 using ::fcp::client::http::HttpRequestHandle;
 using ::fcp::client::http::MockHttpClient;
 using ::fcp::client::http::SimpleHttpRequestMatcher;
-using ::fcp::client::http::internal::CompressWithGzip;
 using ::google::internal::federated::plan::ExampleSelector;
 using ::google::internal::federated::plan::SlicesSelector;
 using ::testing::_;

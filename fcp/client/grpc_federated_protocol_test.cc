@@ -15,23 +15,29 @@
  */
 #include "fcp/client/grpc_federated_protocol.h"
 
-#include <functional>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
-#include <tuple>
 #include <utility>
+#include <vector>
 
-#include "google/protobuf/text_format.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/memory/memory.h"
 #include "absl/random/random.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/cord.h"
+#include "absl/strings/str_cat.h"
 #include "absl/synchronization/blocking_counter.h"
 #include "absl/time/time.h"
 #include "fcp/base/monitoring.h"
 #include "fcp/client/cache/test_helpers.h"
 #include "fcp/client/diag_codes.pb.h"
 #include "fcp/client/engine/engine.pb.h"
+#include "fcp/client/federated_protocol.h"
 #include "fcp/client/grpc_bidi_stream.h"
 #include "fcp/client/http/http_client.h"
 #include "fcp/client/http/testing/test_helpers.h"
@@ -39,12 +45,9 @@
 #include "fcp/client/stats.h"
 #include "fcp/client/test_helpers.h"
 #include "fcp/protos/federated_api.pb.h"
-#include "fcp/secagg/client/secagg_client.h"
-#include "fcp/secagg/shared/aes_ctr_prng_factory.h"
-#include "fcp/secagg/testing/fake_prng.h"
-#include "fcp/secagg/testing/mock_send_to_server_interface.h"
-#include "fcp/secagg/testing/mock_state_transition_listener.h"
+#include "fcp/secagg/shared/secagg_messages.pb.h"
 #include "fcp/testing/testing.h"
+#include "google/protobuf/text_format.h"
 
 namespace fcp::client {
 namespace {
@@ -1254,7 +1257,7 @@ TEST_P(GrpcFederatedProtocolTest, TestCheckinAccept) {
               Field(&FederatedProtocol::SecAggInfo::
                         minimum_clients_in_server_visible_aggregate,
                     kSecAggMinClientsInServerVisibleAggregate))),
-          kTaskName)));
+          Eq(std::nullopt), kTaskName)));
 
   // Issue the regular checkin.
   auto checkin_result = federated_protocol_->Checkin(
@@ -1278,7 +1281,7 @@ TEST_P(GrpcFederatedProtocolTest, TestCheckinAccept) {
                 Field(&FederatedProtocol::SecAggInfo::
                           minimum_clients_in_server_visible_aggregate,
                       kSecAggMinClientsInServerVisibleAggregate))),
-            kTaskName)));
+            Eq(std::nullopt), kTaskName)));
   } else {
     EXPECT_THAT(
         *checkin_result,
@@ -1292,7 +1295,7 @@ TEST_P(GrpcFederatedProtocolTest, TestCheckinAccept) {
                 Field(&FederatedProtocol::SecAggInfo::
                           minimum_clients_in_server_visible_aggregate,
                       kSecAggMinClientsInServerVisibleAggregate))),
-            kTaskName)));
+            Eq(std::nullopt), kTaskName)));
   }
   // The Checkin call is expected to return the accepted retry window from the
   // CheckinRequestAck response to the first eligibility eval request.
@@ -1360,7 +1363,7 @@ TEST_P(GrpcFederatedProtocolTest,
                 Field(&FederatedProtocol::SecAggInfo::
                           minimum_clients_in_server_visible_aggregate,
                       kSecAggMinClientsInServerVisibleAggregate))),
-            kTaskName)));
+            Eq(std::nullopt), kTaskName)));
 
     EXPECT_CALL(mock_http_client_,
                 PerformSingleRequest(SimpleHttpRequestMatcher(
@@ -1402,7 +1405,7 @@ TEST_P(GrpcFederatedProtocolTest,
               Field(&FederatedProtocol::SecAggInfo::
                         minimum_clients_in_server_visible_aggregate,
                     kSecAggMinClientsInServerVisibleAggregate))),
-          kTaskName)));
+          Eq(std::nullopt), kTaskName)));
   // The Checkin call is expected to return the accepted retry window from the
   // CheckinRequestAck response to the first eligibility eval request.
   ExpectAcceptedRetryWindow(federated_protocol_->GetLatestRetryWindow());
@@ -1557,6 +1560,8 @@ TEST_P(GrpcFederatedProtocolTest, TestCheckinAcceptNonSecAgg) {
                     FieldsAre(absl::Cord(kPlan), absl::Cord(kInitCheckpoint)),
                     kFederatedSelectUriTemplate, kExecutionPhaseId,
                     // There should be no SecAggInfo in the result.
+                    Eq(std::nullopt),
+                    // And no ConfidentialAggInfo
                     Eq(std::nullopt), kTaskName)));
   } else {
     EXPECT_THAT(*checkin_result,
@@ -1564,6 +1569,8 @@ TEST_P(GrpcFederatedProtocolTest, TestCheckinAcceptNonSecAgg) {
                     FieldsAre(FieldsAre(kPlan, kInitCheckpoint),
                               kFederatedSelectUriTemplate, kExecutionPhaseId,
                               // There should be no SecAggInfo in the result.
+                              Eq(std::nullopt),
+                              // And no ConfidentialAggInfo
                               Eq(std::nullopt), kTaskName)));
   }
 }
@@ -1591,9 +1598,8 @@ TEST_P(GrpcFederatedProtocolTest, TestReportWithSecAgg) {
                                   FieldsAre(IsEmpty(), 0, IsEmpty()))))))
       .WillOnce(Return(absl::OkStatus()));
   EXPECT_CALL(*mock_grpc_bidi_stream_, Receive(_))
-          .WillOnce(
-              DoAll(SetArgPointee<0>(GetFakeReportResponse()),
-                    Return(absl::OkStatus())));
+      .WillOnce(DoAll(SetArgPointee<0>(GetFakeReportResponse()),
+                      Return(absl::OkStatus())));
   EXPECT_OK(federated_protocol_->ReportCompleted(
       std::move(results), absl::ZeroDuration(), std::nullopt));
 }
@@ -1617,9 +1623,8 @@ TEST_P(GrpcFederatedProtocolTest, TestReportWithSecAggWithoutTFCheckpoint) {
                                           IsEmpty(), 0, IsEmpty()))))))
       .WillOnce(Return(absl::OkStatus()));
   EXPECT_CALL(*mock_grpc_bidi_stream_, Receive(_))
-          .WillOnce(
-              DoAll(SetArgPointee<0>(GetFakeReportResponse()),
-                    Return(absl::OkStatus())));
+      .WillOnce(DoAll(SetArgPointee<0>(GetFakeReportResponse()),
+                      Return(absl::OkStatus())));
   EXPECT_OK(federated_protocol_->ReportCompleted(
       std::move(results), absl::ZeroDuration(), std::nullopt));
 }

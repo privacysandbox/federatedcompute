@@ -14,8 +14,8 @@
 
 # Aggregation Core API
 
-load("//fcp:config.bzl", "FCP_COPTS")
 load("@com_github_grpc_grpc//bazel:python_rules.bzl", "py_proto_library")
+load("//fcp:config.bzl", "FCP_COPTS")
 
 package(
     default_visibility = [
@@ -54,6 +54,7 @@ py_proto_library(
 cc_library(
     name = "tensor",
     srcs = [
+        "datatype.cc",
         "input_tensor_list.cc",
         "tensor.cc",
         "tensor_data.cc",
@@ -112,6 +113,7 @@ cc_library(
     name = "aggregation_cores",
     srcs = [
         "composite_key_combiner.cc",
+        "dp_composite_key_combiner.cc",
         "dp_grouping_federated_sum.cc",
         "federated_mean.cc",
         "federated_sum.cc",
@@ -120,6 +122,7 @@ cc_library(
     ],
     hdrs = [
         "composite_key_combiner.h",
+        "dp_composite_key_combiner.h",
         "group_by_aggregator.h",
         "one_dim_grouping_aggregator.h",
     ],
@@ -131,7 +134,10 @@ cc_library(
         ":tensor_cc_proto",
         ":vector_string_data",
         "//fcp/base",
+        "@com_google_absl//absl/container:fixed_array",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:node_hash_map",
+        "@com_google_absl//absl/random",
     ],
     alwayslink = 1,
 )
@@ -206,6 +212,15 @@ cc_library(
 )
 
 cc_library(
+    name = "mutable_string_data",
+    hdrs = ["mutable_string_data.h"],
+    visibility = [
+        "//visibility:public",
+    ],
+    deps = [":tensor"],
+)
+
+cc_library(
     name = "fedsql_constants",
     hdrs = ["fedsql_constants.h"],
 )
@@ -268,6 +283,23 @@ cc_test(
 )
 
 cc_test(
+    name = "dp_composite_key_combiner_test",
+    srcs = ["dp_composite_key_combiner_test.cc"],
+    deps = [
+        ":aggregation_cores",
+        ":aggregator",
+        ":tensor",
+        ":tensor_cc_proto",
+        "//fcp/aggregation/testing",
+        "//fcp/aggregation/testing:test_data",
+        "//fcp/base",
+        "//fcp/testing",
+        "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "mutable_vector_data_test",
     srcs = ["mutable_vector_data_test.cc"],
     deps = [
@@ -283,6 +315,17 @@ cc_test(
     deps = [
         ":tensor",
         ":vector_string_data",
+        "//fcp/testing",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "mutable_string_data_test",
+    srcs = ["mutable_string_data_test.cc"],
+    deps = [
+        ":mutable_string_data",
+        ":tensor",
         "//fcp/testing",
         "@com_google_googletest//:gtest_main",
     ],
@@ -334,6 +377,23 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "dp_grouping_federated_sum_test",
+    srcs = ["dp_grouping_federated_sum_test.cc"],
+    copts = FCP_COPTS,
+    deps = [
+        ":aggregation_cores",
+        ":aggregator",
+        ":tensor",
+        ":tensor_cc_proto",
+        "//fcp/aggregation/testing",
+        "//fcp/aggregation/testing:test_data",
+        "//fcp/base",
+        "//fcp/testing",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_binary(
     name = "federated_sum_bench",
     testonly = 1,
@@ -348,18 +408,18 @@ cc_binary(
     ],
 )
 
-cc_test(
-    name = "dp_grouping_federated_sum_test",
-    srcs = ["dp_grouping_federated_sum_test.cc"],
+cc_binary(
+    name = "group_by_bench",
+    testonly = 1,
+    srcs = ["group_by_bench.cc"],
     copts = FCP_COPTS,
+    linkstatic = 1,
     deps = [
         ":aggregation_cores",
         ":aggregator",
+        ":mutable_string_data",
         ":tensor",
-        "//fcp/aggregation/testing",
-        "//fcp/aggregation/testing:test_data",
-        "//fcp/base",
-        "//fcp/testing",
-        "@com_google_googletest//:gtest_main",
+        ":tensor_cc_proto",
+        "@com_google_benchmark//:benchmark_main",
     ],
 )

@@ -16,6 +16,7 @@
 #include "fcp/client/http/in_memory_request_response.h"
 
 #include <cstdint>
+#include <filesystem>  // NOLINT(build/c++17)
 #include <memory>
 #include <optional>
 #include <string>
@@ -28,11 +29,12 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/cord.h"
-#include "absl/strings/escaping.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/blocking_counter.h"
 #include "absl/synchronization/notification.h"
 #include "absl/time/time.h"
+#include "fcp/base/compression.h"
 #include "fcp/base/monitoring.h"
 #include "fcp/base/simulated_clock.h"
 #include "fcp/client/cache/file_backed_resource_cache.h"
@@ -45,8 +47,6 @@
 #include "fcp/client/interruptible_runner.h"
 #include "fcp/client/test_helpers.h"
 #include "fcp/testing/testing.h"
-#include "google/protobuf/io/gzip_stream.h"
-#include "google/protobuf/io/zero_copy_stream_impl_lite.h"
 
 namespace fcp::client::http {
 namespace {
@@ -293,7 +293,7 @@ TEST(InMemoryHttpRequestTest, RequestWithCompressedBody) {
   // Expect the second read to indicate the end of the stream.
   EXPECT_THAT((*request)->ReadBody(nullptr, 1), IsCode(OUT_OF_RANGE));
 
-  auto recovered_body = internal::UncompressWithGzip(actual_body);
+  auto recovered_body = UncompressWithGzip(actual_body);
   ASSERT_OK(recovered_body);
   EXPECT_EQ(*recovered_body, uncompressed_body);
 }
@@ -1212,8 +1212,7 @@ TEST_F(PerformRequestsTest, FetchResourcesInMemoryCompressedResources) {
   int expected_response_code = kHttpOk;
   std::string content_type = "bytes+gzip";
   std::string expected_response_body = "response_body: AAAAAAAAAAAAAAAAAAAAA";
-  auto compressed_response_body =
-      internal::CompressWithGzip(expected_response_body);
+  auto compressed_response_body = CompressWithGzip(expected_response_body);
   ASSERT_OK(compressed_response_body);
   EXPECT_CALL(mock_http_client_,
               PerformSingleRequest(
@@ -1326,7 +1325,7 @@ TEST_F(PerformRequestsTest,
   const std::string cache_id = "(^˵◕ω◕˵^)";
   absl::Cord cached_resource("(((*°▽°*)八(*°▽°*)))");
   absl::Cord compressed_cached_resource(
-      *internal::CompressWithGzip(std::string(cached_resource)));
+      *CompressWithGzip(std::string(cached_resource)));
   absl::Duration max_age = absl::Hours(1);
   int expected_response_code = kHttpOk;
   auto resource = UriOrInlineData::CreateUri(uri, cache_id, max_age);
@@ -1410,7 +1409,7 @@ TEST_F(PerformRequestsTest,
   int expected_response_code = kHttpOk;
   std::string content_type = "bytes+gzip";
   absl::Cord compressed_response_body(
-      *internal::CompressWithGzip(std::string(expected_response_body)));
+      *CompressWithGzip(std::string(expected_response_body)));
   auto resource = UriOrInlineData::CreateUri(uri, cache_id, max_age);
 
   EXPECT_CALL(mock_http_client_,

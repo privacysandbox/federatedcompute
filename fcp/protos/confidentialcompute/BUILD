@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@com_github_grpc_grpc//bazel:python_rules.bzl", "py_grpc_library", "py_proto_library")
 load("@com_github_grpc_grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
+load("@com_github_grpc_grpc//bazel:python_rules.bzl", "py_grpc_library", "py_proto_library")
 load("@org_tensorflow//tensorflow/core/platform:build_config.bzl", "tf_proto_library")
 
 package(
@@ -44,6 +44,16 @@ cc_proto_library(
 )
 
 proto_library(
+    name = "aggregation_client_payload_proto",
+    srcs = ["aggregation_client_payload.proto"],
+)
+
+cc_proto_library(
+    name = "aggregation_client_payload_cc_proto",
+    deps = [":aggregation_client_payload_proto"],
+)
+
+proto_library(
     name = "ledger_proto",
     srcs = ["ledger.proto"],
     deps = [
@@ -51,6 +61,7 @@ proto_library(
         "@com_google_protobuf//:timestamp_proto",
         "@oak//proto/attestation:endorsement_proto",
         "@oak//proto/attestation:evidence_proto",
+        "@oak//proto/micro_rpc:options_proto",
     ],
 )
 
@@ -65,6 +76,7 @@ proto_library(
     deps = [
         "@com_google_protobuf//:any_proto",
         "@oak//proto/attestation:evidence_proto",
+        "@oak//proto/micro_rpc:options_proto",
     ],
 )
 
@@ -96,6 +108,7 @@ cc_proto_library(
 cc_grpc_library(
     name = "pipeline_transform_cc_grpc",
     srcs = [":pipeline_transform_proto"],
+    generate_mocks = True,
     grpc_only = True,
     deps = [":pipeline_transform_cc_proto"],
 )

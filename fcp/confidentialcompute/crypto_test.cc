@@ -13,16 +13,20 @@
 // limitations under the License.
 #include "fcp/confidentialcompute/crypto.h"
 
+#include <sys/types.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 
+#include "google/protobuf/struct.pb.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/escaping.h"
 #include "absl/strings/string_view.h"
 #include "fcp/base/monitoring.h"
 #include "fcp/confidentialcompute/cose.h"
@@ -61,18 +65,23 @@ TEST(CryptoTest, GetPublicKey) {
   EXPECT_CALL(signer, Call(_))
       .WillOnce(DoAll(SaveArg<0>(&sig_structure), Return("signature")));
 
-  MessageDecryptor decryptor;
+  google::protobuf::Struct config_properties;
+  (*config_properties.mutable_fields())["key"].set_string_value("value");
+
+  MessageDecryptor decryptor(config_properties);
   absl::StatusOr<std::string> recipient_public_key =
-      decryptor.GetPublicKey(signer.AsStdFunction());
+      decryptor.GetPublicKey(signer.AsStdFunction(), 7);
   ASSERT_OK(recipient_public_key);
 
   absl::StatusOr<OkpCwt> cwt = OkpCwt::Decode(*recipient_public_key);
   ASSERT_OK(cwt);
+  EXPECT_EQ(cwt->algorithm, 7);
   ASSERT_NE(cwt->public_key, std::nullopt);
   EXPECT_EQ(cwt->public_key->algorithm,
             crypto_internal::kHpkeBaseX25519Sha256Aes128Gcm);
   EXPECT_EQ(cwt->public_key->curve, crypto_internal::kX25519);
   EXPECT_NE(cwt->public_key->x, "");
+  EXPECT_THAT(cwt->config_properties, EqualsProto(config_properties));
   EXPECT_EQ(cwt->signature, "signature");
 
   // The signature structure is a COSE implementation detail, but it should at
@@ -86,7 +95,7 @@ TEST(CryptoTest, GetPublicKeyCwtSigningError) {
       .WillOnce(Return(absl::FailedPreconditionError("")));
 
   MessageDecryptor decryptor;
-  EXPECT_THAT(decryptor.GetPublicKey(signer.AsStdFunction()),
+  EXPECT_THAT(decryptor.GetPublicKey(signer.AsStdFunction(), 0),
               IsCode(FAILED_PRECONDITION));
 }
 
@@ -98,7 +107,7 @@ TEST(CryptoTest, EncryptAndDecrypt) {
   MessageDecryptor decryptor;
 
   absl::StatusOr<std::string> recipient_public_key =
-      decryptor.GetPublicKey([](absl::string_view) { return ""; });
+      decryptor.GetPublicKey([](absl::string_view) { return ""; }, 0);
   ASSERT_OK(recipient_public_key);
 
   absl::StatusOr<EncryptMessageResult> encrypt_result =
@@ -121,7 +130,7 @@ TEST(CryptoTest, EncryptRewrapKeyAndDecrypt) {
   MessageDecryptor decryptor;
 
   absl::StatusOr<std::string> recipient_public_key =
-      decryptor.GetPublicKey([](absl::string_view) { return ""; });
+      decryptor.GetPublicKey([](absl::string_view) { return ""; }, 0);
   ASSERT_OK(recipient_public_key);
   absl::StatusOr<OkpCwt> recipient_cwt = OkpCwt::Decode(*recipient_public_key);
   ASSERT_OK(recipient_cwt);
@@ -219,7 +228,7 @@ TEST(CryptoTest, EncryptWithInvalidCwtAlgorithmFails) {
   std::string associated_data = "associated data";
 
   absl::StatusOr<std::string> public_key =
-      MessageDecryptor().GetPublicKey([](absl::string_view) { return ""; });
+      MessageDecryptor().GetPublicKey([](absl::string_view) { return ""; }, 0);
   ASSERT_OK(public_key);
   absl::StatusOr<OkpCwt> cwt = OkpCwt::Decode(*public_key);
   ASSERT_OK(cwt);
@@ -238,7 +247,7 @@ TEST(CryptoTest, EncryptWithInvalidCwtCurveFails) {
   std::string associated_data = "associated data";
 
   absl::StatusOr<std::string> public_key =
-      MessageDecryptor().GetPublicKey([](absl::string_view) { return ""; });
+      MessageDecryptor().GetPublicKey([](absl::string_view) { return ""; }, 0);
   ASSERT_OK(public_key);
   absl::StatusOr<OkpCwt> cwt = OkpCwt::Decode(*public_key);
   ASSERT_OK(cwt);
@@ -331,7 +340,7 @@ TEST(CryptoTest, DecryptWithWrongKeyFails) {
   MessageDecryptor decryptor;
 
   absl::StatusOr<std::string> recipient_public_key =
-      decryptor.GetPublicKey([](absl::string_view) { return ""; });
+      decryptor.GetPublicKey([](absl::string_view) { return ""; }, 0);
   ASSERT_OK(recipient_public_key);
 
   // Encrypt the symmetric key with the public key of an intermediary.
@@ -367,7 +376,7 @@ TEST(CryptoTest, DecryptWithWrongCiphertextAssociatedDataFails) {
   MessageDecryptor decryptor;
 
   absl::StatusOr<std::string> recipient_public_key =
-      decryptor.GetPublicKey([](absl::string_view) { return ""; });
+      decryptor.GetPublicKey([](absl::string_view) { return ""; }, 0);
   ASSERT_OK(recipient_public_key);
 
   absl::StatusOr<EncryptMessageResult> encrypt_result =
@@ -389,7 +398,7 @@ TEST(CryptoTest, DecryptWithWrongSymmetricKeyAssociatedDataFails) {
   MessageDecryptor decryptor;
 
   absl::StatusOr<std::string> recipient_public_key =
-      decryptor.GetPublicKey([](absl::string_view) { return ""; });
+      decryptor.GetPublicKey([](absl::string_view) { return ""; }, 0);
   ASSERT_OK(recipient_public_key);
 
   absl::StatusOr<EncryptMessageResult> encrypt_result =
@@ -411,7 +420,7 @@ TEST(CryptoTest, DecryptWithWrongEncappedKeyFails) {
   MessageDecryptor decryptor;
 
   absl::StatusOr<std::string> recipient_public_key =
-      decryptor.GetPublicKey([](absl::string_view) { return ""; });
+      decryptor.GetPublicKey([](absl::string_view) { return ""; }, 0);
   ASSERT_OK(recipient_public_key);
 
   absl::StatusOr<EncryptMessageResult> encrypt_result =
@@ -433,7 +442,7 @@ TEST(CryptoTest, DecryptWithInvalidCiphertextFails) {
   MessageDecryptor decryptor;
 
   absl::StatusOr<std::string> recipient_public_key =
-      decryptor.GetPublicKey([](absl::string_view) { return ""; });
+      decryptor.GetPublicKey([](absl::string_view) { return ""; }, 0);
   ASSERT_OK(recipient_public_key);
 
   absl::StatusOr<EncryptMessageResult> encrypt_result =
@@ -455,7 +464,7 @@ TEST(CryptoTest, DecryptWithInvalidSymmetricKeyFails) {
   MessageDecryptor decryptor;
 
   absl::StatusOr<std::string> recipient_public_key =
-      decryptor.GetPublicKey([](absl::string_view) { return ""; });
+      decryptor.GetPublicKey([](absl::string_view) { return ""; }, 0);
   ASSERT_OK(recipient_public_key);
 
   absl::StatusOr<EncryptMessageResult> encrypt_result =
@@ -476,7 +485,7 @@ TEST(CryptoTest, DecryptWithInvalidEncappedKeyFails) {
   MessageDecryptor decryptor;
 
   absl::StatusOr<std::string> recipient_public_key =
-      decryptor.GetPublicKey([](absl::string_view) { return ""; });
+      decryptor.GetPublicKey([](absl::string_view) { return ""; }, 0);
   ASSERT_OK(recipient_public_key);
 
   absl::StatusOr<EncryptMessageResult> encrypt_result =
@@ -498,7 +507,7 @@ TEST(CryptoTest, DecryptWithInvalidAlgorithmFails) {
   MessageDecryptor decryptor;
 
   absl::StatusOr<std::string> recipient_public_key =
-      decryptor.GetPublicKey([](absl::string_view) { return ""; });
+      decryptor.GetPublicKey([](absl::string_view) { return ""; }, 0);
   ASSERT_OK(recipient_public_key);
   absl::StatusOr<OkpCwt> recipient_cwt = OkpCwt::Decode(*recipient_public_key);
   ASSERT_OK(recipient_cwt);
@@ -554,6 +563,141 @@ TEST(CryptoTest, DecryptWithInvalidAlgorithmFails) {
                         symmetric_key_associated_data,
                         rewrapped_symmetric_key_result->encapped_key);
   EXPECT_THAT(decrypt_result, fcp::IsCode(INVALID_ARGUMENT));
+}
+
+TEST(EcdsaP256R1SignatureVerifierTest, VerifierWithInvalidPublicKeyFails) {
+  // Verify a real signature with a bogus public key, which should fail.
+  absl::StatusOr<EcdsaP256R1SignatureVerifier> verifier =
+      EcdsaP256R1SignatureVerifier::Create("not a valid public key");
+  EXPECT_THAT(verifier, IsCode(INVALID_ARGUMENT));
+  EXPECT_THAT(verifier.status().message(),
+              HasSubstr("Failed to initialize public key"));
+}
+
+TEST(EcdsaP256R1SignatureVerifierTest, VerifierWithEmptyPublicKeyFails) {
+  // Attempt to create a verifier with an empty public key, which should fail.
+  absl::StatusOr<EcdsaP256R1SignatureVerifier> verifier =
+      EcdsaP256R1SignatureVerifier::Create(/*public_key=*/"");
+  EXPECT_THAT(verifier, IsCode(INVALID_ARGUMENT));
+  EXPECT_THAT(verifier.status().message(),
+              HasSubstr("Failed to initialize public key"));
+}
+
+TEST(EcdsaP256R1SignatureVerifierTest, ValidSignatureVerifiesSuccessfully) {
+  absl::string_view data_to_sign = "some string to be signed";
+
+  // Generate a signature for the data.
+  EcdsaP256R1Signer signer = EcdsaP256R1Signer::Create();
+  std::string signature = signer.Sign(data_to_sign);
+
+  // Verify the signature.
+  absl::StatusOr<EcdsaP256R1SignatureVerifier> verifier =
+      EcdsaP256R1SignatureVerifier::Create(signer.GetPublicKey());
+  ASSERT_OK(verifier);
+  auto result = verifier->Verify(data_to_sign, signature);
+  ASSERT_OK(result);
+}
+
+// Ensures that an empty data string can still be signed successfully, and
+// doesn't cause a crash or error.
+TEST(EcdsaP256R1SignatureVerifierTest,
+     EmptyDataValidSignatureVerifiesSuccessfully) {
+  absl::string_view empty_string = "";
+
+  // Generate a signature for the data.
+  EcdsaP256R1Signer signer = EcdsaP256R1Signer::Create();
+  std::string signature = signer.Sign(empty_string);
+
+  // Verify the signature.
+  absl::StatusOr<EcdsaP256R1SignatureVerifier> verifier =
+      EcdsaP256R1SignatureVerifier::Create(signer.GetPublicKey());
+  ASSERT_OK(verifier);
+  auto result = verifier->Verify(empty_string, signature);
+  ASSERT_OK(result);
+}
+
+TEST(EcdsaP256R1SignatureVerifierTest, InvalidSignatureFailsVerification) {
+  absl::string_view data_to_sign = "some string to be signed";
+
+  // Create a signer, so we can get a valid public key.
+  EcdsaP256R1Signer signer = EcdsaP256R1Signer::Create();
+
+  // Verify a bogus signature not generated with that public key, which should
+  // fail.
+  absl::StatusOr<EcdsaP256R1SignatureVerifier> verifier =
+      EcdsaP256R1SignatureVerifier::Create(signer.GetPublicKey());
+  ASSERT_OK(verifier);
+  auto result = verifier->Verify(data_to_sign, "not a valid signature");
+  EXPECT_THAT(result, IsCode(INVALID_ARGUMENT));
+  EXPECT_THAT(result.message(), HasSubstr("Invalid signature"));
+}
+
+TEST(EcdsaP256R1SignatureVerifierTest, EmptySignatureFailsVerification) {
+  absl::string_view data_to_sign = "some string to be signed";
+
+  // Create a signer, so we can get a valid public key.
+  EcdsaP256R1Signer signer = EcdsaP256R1Signer::Create();
+
+  // Verify with an empty signature, which should fail.
+  absl::StatusOr<EcdsaP256R1SignatureVerifier> verifier =
+      EcdsaP256R1SignatureVerifier::Create(signer.GetPublicKey());
+  ASSERT_OK(verifier);
+  auto result = verifier->Verify(data_to_sign, "");
+  EXPECT_THAT(result, IsCode(INVALID_ARGUMENT));
+  EXPECT_THAT(result.message(), HasSubstr("Invalid signature"));
+}
+
+TEST(EcdsaP256R1SignatureVerifierTest, MismatchingPublicKeyFailsVerification) {
+  absl::string_view data_to_sign = "some string to be signed";
+
+  // Generate a signature for the data.
+  EcdsaP256R1Signer signer = EcdsaP256R1Signer::Create();
+  std::string signature = signer.Sign(data_to_sign);
+
+  // Create a second signer, which will have a different public key.
+  EcdsaP256R1Signer second_signer = EcdsaP256R1Signer::Create();
+
+  // Verify a signature from the first signer with the second signer's public
+  // key, which should fail.
+  absl::StatusOr<EcdsaP256R1SignatureVerifier> verifier =
+      EcdsaP256R1SignatureVerifier::Create(second_signer.GetPublicKey());
+  ASSERT_OK(verifier);
+  auto result = verifier->Verify(data_to_sign, signature);
+  EXPECT_THAT(result, IsCode(INVALID_ARGUMENT));
+  EXPECT_THAT(result.message(), HasSubstr("Invalid signature"));
+}
+
+TEST(EcdsaP256R1SignatureVerifierTest,
+     EmptyDataAndSignatureAndValidKeyFailsVerification) {
+  EcdsaP256R1Signer signer = EcdsaP256R1Signer::Create();
+  // Verify an empty data string with empty signature, which should fail.
+  absl::StatusOr<EcdsaP256R1SignatureVerifier> verifier =
+      EcdsaP256R1SignatureVerifier::Create(signer.GetPublicKey());
+  ASSERT_OK(verifier);
+  auto result = verifier->Verify("", "");
+  EXPECT_THAT(result, IsCode(INVALID_ARGUMENT));
+}
+
+// Tests that the signature verifier can successfully verify a known example of
+// a valid <public key,signature,data> triple.
+TEST(EcdsaP256R1SignatureVerifierTest, VerifyReferenceExample) {
+  std::string public_key = absl::HexStringToBytes(
+      "0429207056114055f94e46b14e55e6e3f1f088bea3bbc8c7d3cc140161551d42b1397395"
+      "1c88e7638d800395191db1fa12515a174235cc291caa189eb2b4b4de19");
+
+  std::string signature = absl::HexStringToBytes(
+      "43675a6d2f2c2dfab5ab0497030ac63bafb9b9c6f09bcae8265e49543e8888cddc023453"
+      "9a1f54fee3cb0781255c1c8c07c5d769095a3d1bd08d1ab57185b582");
+
+  std::string data = absl::HexStringToBytes(
+      "846a5369676e61747572653143a10126405848a3041a65fcb9b6061a65f37f363a000100"
+      "005834a501010244b9d87c09033a000100002004215820bf33767a49e111cfcc9c1c8400"
+      "a40e8c6205073d76794416ff13066bd08a6568");
+
+  absl::StatusOr<EcdsaP256R1SignatureVerifier> verifier =
+      EcdsaP256R1SignatureVerifier::Create(public_key);
+  ASSERT_OK(verifier);
+  ASSERT_OK(verifier->Verify(data, signature));
 }
 
 }  // namespace

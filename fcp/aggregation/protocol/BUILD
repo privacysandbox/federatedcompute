@@ -14,8 +14,8 @@
 
 # Aggregation Protocol Package
 
-load("//fcp:config.bzl", "FCP_COPTS")
 load("@com_github_grpc_grpc//bazel:python_rules.bzl", "py_proto_library")
+load("//fcp:config.bzl", "FCP_COPTS")
 
 package(
     default_visibility = [
@@ -55,6 +55,7 @@ proto_library(
 
 cc_proto_library(
     name = "configuration_cc_proto",
+    visibility = ["//visibility:public"],
     deps = [
         ":configuration_proto",
     ],
@@ -125,6 +126,7 @@ cc_library(
     srcs = ["checkpoint_aggregator.cc"],
     hdrs = ["checkpoint_aggregator.h"],
     copts = FCP_COPTS,
+    visibility = ["//visibility:public"],
     deps = [
         ":checkpoint_builder",
         ":checkpoint_parser",

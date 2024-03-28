@@ -14,12 +14,13 @@
 
 #include "fcp/confidentialcompute/cose.h"
 
-#include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -27,18 +28,15 @@
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
 #include "fcp/base/monitoring.h"
-#include "fcp/confidentialcompute/cbor_utils.h"
-#include "cbor.h"
-#include "cbor/arrays.h"
-#include "cbor/bytestrings.h"
-#include "cbor/common.h"
-#include "cbor/data.h"
-#include "cbor/ints.h"
-#include "cbor/maps.h"
-#include "cbor/strings.h"
+#include "libcppbor/include/cppbor/cppbor.h"
+#include "libcppbor/include/cppbor/cppbor_parse.h"
 
 namespace fcp::confidential_compute {
 namespace {
+
+using ::cppbor::Array;
+using ::cppbor::Bstr;
+using ::cppbor::Map;
 
 // CWT Claims; see https://www.iana.org/assignments/cwt/cwt.xhtml.
 enum CwtClaim {
@@ -50,8 +48,14 @@ enum CwtClaim {
   // this project and
   // https://github.com/project-oak/oak/blob/main/oak_dice/src/cert.rs for Oak
   // claims.
-  kPublicKey = -65537,       // Claim containing serialized public key.
-  kOakPublicKey = -4670552,  // Oak claim containing serialized public key.
+  kPublicKey = -65537,         // Claim containing serialized public key.
+  kConfigProperties = -65538,  // Claim containing configuration properties.
+  kOakPublicKey = -4670552,    // Oak claim containing serialized public key.
+};
+
+// COSE Header parameters; see https://www.iana.org/assignments/cose/cose.xhtml.
+enum CoseHeaderParameter {
+  kHdrAlg = 1,
 };
 
 // COSE Key parameters; see https://www.iana.org/assignments/cose/cose.xhtml.
@@ -75,111 +79,202 @@ enum CoseKeyType {
   kSymmetric = 4,
 };
 
-// Builds the protected header for a CWT, which is simply an empty map encoded
-// as a bstr.
-absl::StatusOr<CborRef> BuildCwtProtectedHeader(const OkpCwt&) {
-  return SerializeCbor(*CborRef(cbor_new_definite_map(0)));
+// Builds the protected header for a CWT, which is a map encoded as a bstr.
+absl::StatusOr<std::vector<uint8_t>> BuildCwtProtectedHeader(
+    const OkpCwt& cwt) {
+  Map map;
+  if (cwt.algorithm) {
+    map.add(CoseHeaderParameter::kHdrAlg, *cwt.algorithm);
+  }
+  return map.encode();
 }
 
 // Builds the payload for a CWT, which is a map of CWT claims encoded as a bstr.
 // See RFC 8392 section 7.1.
-absl::StatusOr<CborRef> BuildCwtPayload(const OkpCwt& cwt) {
-  CborRef payload(cbor_new_definite_map(3));
-  bool err = false;
-  err |= cwt.expiration_time &&
-         !cbor_map_add(
-             payload.get(),
-             {BuildCborInt(CwtClaim::kExp).get(),
-              BuildCborInt(absl::ToUnixSeconds(*cwt.expiration_time)).get()});
-  err |=
-      cwt.issued_at &&
-      !cbor_map_add(payload.get(),
-                    {BuildCborInt(CwtClaim::kIat).get(),
-                     BuildCborInt(absl::ToUnixSeconds(*cwt.issued_at)).get()});
+absl::StatusOr<std::vector<uint8_t>> BuildCwtPayload(const OkpCwt& cwt) {
+  Map map;
+  if (cwt.expiration_time) {
+    map.add(CwtClaim::kExp, absl::ToUnixSeconds(*cwt.expiration_time));
+  }
+  if (cwt.issued_at) {
+    map.add(CwtClaim::kIat, absl::ToUnixSeconds(*cwt.issued_at));
+  }
   if (cwt.public_key) {
     FCP_ASSIGN_OR_RETURN(std::string encoded_public_key,
                          cwt.public_key->Encode());
-    err |= !cbor_map_add(
-        payload.get(),
-        {BuildCborInt(CwtClaim::kPublicKey).get(),
-         CborRef(cbor_build_bytestring(
-                     reinterpret_cast<cbor_data>(encoded_public_key.data()),
-                     encoded_public_key.size()))
-             .get()});
+    map.add(CwtClaim::kPublicKey, Bstr(encoded_public_key));
   }
-  if (err) {
-    return absl::InvalidArgumentError("failed to encode CWT payload");
+  if (!cwt.config_properties.fields().empty()) {
+    map.add(CwtClaim::kConfigProperties,
+            Bstr(cwt.config_properties.SerializeAsString()));
   }
-  return SerializeCbor(*payload);
+  return map.encode();
+}
+
+// Parses a serialized CWT protected header and updates the OkpCwt.
+absl::Status ParseCwtProtectedHeader(
+    const std::vector<uint8_t>& serialized_header, OkpCwt& cwt) {
+  auto [payload, end_pos, error] =
+      cppbor::parse(serialized_header.data(), serialized_header.size());
+  if (!error.empty()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("failed to decode CWT protected header: ", error));
+  } else if (end_pos != serialized_header.data() + serialized_header.size()) {
+    return absl::InvalidArgumentError(
+        "failed to decode CWT protected header: input contained extra data");
+  } else if (payload->type() != cppbor::MAP) {
+    return absl::InvalidArgumentError("CWT protected header is invalid");
+  }
+
+  // Process the parameters map.
+  for (const auto& [key, value] : *payload->asMap()) {
+    if (key->asInt() == nullptr) continue;  // Ignore other key types.
+    switch (key->asInt()->value()) {
+      case CoseHeaderParameter::kHdrAlg:
+        if (value->asInt() == nullptr) {
+          return absl::InvalidArgumentError(absl::StrCat(
+              "unsupported algorithm parameter type ", value->type()));
+        }
+        cwt.algorithm = value->asInt()->value();
+        break;
+
+      default:
+        break;
+    }
+  }
+  return absl::OkStatus();
+}
+
+// Parses a serialized CWT payload and updated the OkpCwt.
+absl::Status ParseCwtPayload(const std::vector<uint8_t>& serialized_payload,
+                             OkpCwt& cwt) {
+  auto [payload, end_pos, error] =
+      cppbor::parse(serialized_payload.data(), serialized_payload.size());
+  if (!error.empty()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("failed to decode CWT payload: ", error));
+  } else if (end_pos != serialized_payload.data() + serialized_payload.size()) {
+    return absl::InvalidArgumentError(
+        "failed to decode CWT payload: input contained extra data");
+  } else if (payload->type() != cppbor::MAP) {
+    return absl::InvalidArgumentError("CWT payload is invalid");
+  }
+
+  // Process the claims map.
+  for (const auto& [key, value] : *payload->asMap()) {
+    if (key->asInt() == nullptr) continue;  // Ignore other key types.
+    switch (key->asInt()->value()) {
+      case CwtClaim::kExp:
+        if (value->asInt() == nullptr) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("unsupported exp type ", value->type()));
+        }
+        cwt.expiration_time = absl::FromUnixSeconds(value->asInt()->value());
+        break;
+
+      case CwtClaim::kIat:
+        if (value->asInt() == nullptr) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("unsupported iat type ", value->type()));
+        }
+        cwt.issued_at = absl::FromUnixSeconds(value->asInt()->value());
+        break;
+
+      case CwtClaim::kOakPublicKey:
+      case CwtClaim::kPublicKey: {
+        if (value->type() != cppbor::BSTR) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("unsupported public_key type ", value->type()));
+        }
+        FCP_ASSIGN_OR_RETURN(
+            cwt.public_key,
+            OkpKey::Decode(absl::string_view(
+                reinterpret_cast<const char*>(value->asBstr()->value().data()),
+                value->asBstr()->value().size())));
+        break;
+      }
+
+      case CwtClaim::kConfigProperties:
+        if (value->type() != cppbor::BSTR) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("unsupported configuration type ", value->type()));
+        }
+        if (!cwt.config_properties.ParseFromArray(
+                value->asBstr()->value().data(),
+                static_cast<int>(value->asBstr()->value().size()))) {
+          return absl::InvalidArgumentError("failed to parse configuration");
+        }
+        break;
+
+      default:
+        break;
+    }
+  }
+  return absl::OkStatus();
 }
 
 }  // namespace
 
 absl::StatusOr<OkpKey> OkpKey::Decode(absl::string_view encoded) {
-  cbor_load_result result;
-  CborRef item(cbor_load(reinterpret_cast<cbor_data>(encoded.data()),
-                         encoded.size(), &result));
-  if (!item || result.read != encoded.size()) {
-    return absl::InvalidArgumentError(absl::StrCat(
-        "failed to fully decode OkpKey (error ", result.error.code, ")"));
-  }
-  if (!cbor_isa_map(item.get())) {
+  auto [item, end_pos, error] = cppbor::parse(
+      reinterpret_cast<const uint8_t*>(encoded.data()), encoded.size());
+  if (!error.empty()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("failed to decode OkpKey: ", error));
+  } else if (end_pos != reinterpret_cast<const uint8_t*>(encoded.data()) +
+                            encoded.size()) {
+    return absl::InvalidArgumentError(
+        "failed to decode OkpKey: input contained extra data");
+  } else if (item->type() != cppbor::MAP) {
     return absl::InvalidArgumentError("OkpKey is invalid");
   }
 
   // Process the parameters map.
   std::optional<uint64_t> kty;
   OkpKey okp_key;
-  const cbor_pair* params = cbor_map_handle(item.get());
-  const size_t params_count = cbor_map_size(item.get());
-  for (int i = 0; i < params_count; ++i) {
-    absl::StatusOr<int64_t> key = GetCborInt(*params[i].key);
-    if (!key.ok()) continue;  // Ignore other key types.
-    switch (*key) {
+  for (const auto& [key, value] : *item->asMap()) {
+    if (key->asInt() == nullptr) continue;  // Ignore other key types.
+    switch (key->asInt()->value()) {
       case CoseKeyParameter::kKty:
-        if (!cbor_isa_uint(params[i].value)) {
-          return absl::InvalidArgumentError(absl::StrCat(
-              "unsupported kty type ", cbor_typeof(params[i].value)));
+        if (value->asInt() == nullptr) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("unsupported kty type ", value->type()));
         }
-        kty = cbor_get_int(params[i].value);
+        kty = value->asInt()->value();
         break;
 
       case CoseKeyParameter::kKid:
-        if (!cbor_isa_bytestring(params[i].value)) {
-          return absl::InvalidArgumentError(absl::StrCat(
-              "unsupported kid type ", cbor_typeof(params[i].value)));
+        if (value->type() != cppbor::BSTR) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("unsupported kid type ", value->type()));
         }
-        okp_key.key_id = std::string(
-            reinterpret_cast<char*>(cbor_bytestring_handle(params[i].value)),
-            cbor_bytestring_length(params[i].value));
+        okp_key.key_id.assign(value->asBstr()->value().begin(),
+                              value->asBstr()->value().end());
         break;
 
-      case CoseKeyParameter::kAlg: {
-        if (!cbor_is_int(params[i].value)) {
-          return absl::InvalidArgumentError(absl::StrCat(
-              "unsupported alg type ", cbor_typeof(params[i].value)));
+      case CoseKeyParameter::kAlg:
+        if (value->asInt() == nullptr) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("unsupported alg type ", value->type()));
         }
-        FCP_ASSIGN_OR_RETURN(okp_key.algorithm, GetCborInt(*params[i].value));
+        okp_key.algorithm = value->asInt()->value();
         break;
-      }
 
-      case CoseKeyParameter::kOkpCrv: {
-        if (!cbor_is_int(params[i].value)) {
-          return absl::InvalidArgumentError(absl::StrCat(
-              "unsupported curve type ", cbor_typeof(params[i].value)));
+      case CoseKeyParameter::kOkpCrv:
+        if (value->asInt() == nullptr) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("unsupported curve type ", value->type()));
         }
-        FCP_ASSIGN_OR_RETURN(okp_key.curve, GetCborInt(*params[i].value));
+        okp_key.curve = value->asInt()->value();
         break;
-      }
 
       case CoseKeyParameter::kOkpX:
-        if (!cbor_isa_bytestring(params[i].value)) {
-          return absl::InvalidArgumentError(absl::StrCat(
-              "unsupported x type ", cbor_typeof(params[i].value)));
+        if (value->type() != cppbor::BSTR) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("unsupported x type ", value->type()));
         }
-        okp_key.x = std::string(
-            reinterpret_cast<char*>(cbor_bytestring_handle(params[i].value)),
-            cbor_bytestring_length(params[i].value));
+        okp_key.x.assign(value->asBstr()->value().begin(),
+                         value->asBstr()->value().end());
         break;
 
       default:
@@ -195,81 +290,66 @@ absl::StatusOr<OkpKey> OkpKey::Decode(absl::string_view encoded) {
 
 absl::StatusOr<std::string> OkpKey::Encode() const {
   // Generate a map containing the parameters that are set.
-  CborRef item(cbor_new_definite_map(5));
-  if (!cbor_map_add(item.get(), {BuildCborInt(CoseKeyParameter::kKty).get(),
-                                 BuildCborInt(CoseKeyType::kOkp).get()}) ||
-      (!key_id.empty() &&
-       !cbor_map_add(item.get(),
-                     {BuildCborInt(CoseKeyParameter::kKid).get(),
-                      CborRef(cbor_build_bytestring(
-                                  reinterpret_cast<cbor_data>(key_id.data()),
-                                  key_id.size()))
-                          .get()})) ||
-      (algorithm &&
-       !cbor_map_add(item.get(), {BuildCborInt(CoseKeyParameter::kAlg).get(),
-                                  BuildCborInt(*algorithm).get()})) ||
-      (curve &&
-       !cbor_map_add(item.get(), {BuildCborInt(CoseKeyParameter::kOkpCrv).get(),
-                                  BuildCborInt(*curve).get()})) ||
-      (!x.empty() &&
-       !cbor_map_add(
-           item.get(),
-           {BuildCborInt(CoseKeyParameter::kOkpX).get(),
-            CborRef(cbor_build_bytestring(reinterpret_cast<cbor_data>(x.data()),
-                                          x.size()))
-                .get()}))) {
-    return absl::InvalidArgumentError("failed to encode symmetric key");
+  Map map;
+  map.add(CoseKeyParameter::kKty, CoseKeyType::kOkp);
+  if (!key_id.empty()) {
+    map.add(CoseKeyParameter::kKid, Bstr(key_id));
   }
-  return SerializeCborToString(*item);
+  if (algorithm) {
+    map.add(CoseKeyParameter::kAlg, *algorithm);
+  }
+  if (curve) {
+    map.add(CoseKeyParameter::kOkpCrv, *curve);
+  }
+  if (!x.empty()) {
+    map.add(CoseKeyParameter::kOkpX, Bstr(x));
+  }
+  return map.toString();
 }
 
 absl::StatusOr<SymmetricKey> SymmetricKey::Decode(absl::string_view encoded) {
-  cbor_load_result result;
-  CborRef item(cbor_load(reinterpret_cast<cbor_data>(encoded.data()),
-                         encoded.size(), &result));
-  if (!item || result.read != encoded.size()) {
-    return absl::InvalidArgumentError(absl::StrCat(
-        "failed to fully decode SymmetricKey (error ", result.error.code, ")"));
-  }
-  if (!cbor_isa_map(item.get())) {
+  auto [item, end_pos, error] = cppbor::parse(
+      reinterpret_cast<const uint8_t*>(encoded.data()), encoded.size());
+  if (!error.empty()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("failed to decode SymmetricKey: ", error));
+  } else if (end_pos != reinterpret_cast<const uint8_t*>(encoded.data()) +
+                            encoded.size()) {
+    return absl::InvalidArgumentError(
+        "failed to decode SymmetricKey: input contained extra data");
+  } else if (item->type() != cppbor::MAP) {
     return absl::InvalidArgumentError("SymmetricKey is invalid");
   }
 
   // Process the parameters map.
   std::optional<uint64_t> kty;
   SymmetricKey symmetric_key;
-  const cbor_pair* params = cbor_map_handle(item.get());
-  const size_t params_count = cbor_map_size(item.get());
-  for (int i = 0; i < params_count; ++i) {
-    absl::StatusOr<int64_t> key = GetCborInt(*params[i].key);
-    if (!key.ok()) continue;  // Ignore other key types.
-    switch (*key) {
+  for (const auto& [key, value] : *item->asMap()) {
+    if (key->asInt() == nullptr) continue;  // Ignore other key types.
+    switch (key->asInt()->value()) {
       case CoseKeyParameter::kKty:
-        if (!cbor_isa_uint(params[i].value)) {
-          return absl::InvalidArgumentError(absl::StrCat(
-              "unsupported kty type ", cbor_typeof(params[i].value)));
+        if (value->asInt() == nullptr) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("unsupported kty type ", value->type()));
         }
-        kty = cbor_get_int(params[i].value);
+        kty = value->asInt()->value();
         break;
 
-      case CoseKeyParameter::kAlg: {
-        if (!cbor_is_int(params[i].value)) {
-          return absl::InvalidArgumentError(absl::StrCat(
-              "unsupported alg type ", cbor_typeof(params[i].value)));
+      case CoseKeyParameter::kAlg:
+        if (value->asInt() == nullptr) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("unsupported alg type ", value->type()));
         }
-        FCP_ASSIGN_OR_RETURN(symmetric_key.algorithm,
-                             GetCborInt(*params[i].value));
+        symmetric_key.algorithm = value->asInt()->value();
         break;
-      }
 
       case CoseKeyParameter::kSymmetricK:
-        if (!cbor_isa_bytestring(params[i].value)) {
-          return absl::InvalidArgumentError(absl::StrCat(
-              "unsupported k type ", cbor_typeof(params[i].value)));
+        if (value->type() != cppbor::BSTR) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("unsupported k type ", value->type()));
         }
-        symmetric_key.k = std::string(
-            reinterpret_cast<char*>(cbor_bytestring_handle(params[i].value)),
-            cbor_bytestring_length(params[i].value));
+        symmetric_key.k.assign(value->asBstr()->value().begin(),
+                               value->asBstr()->value().end());
         break;
 
       default:
@@ -285,144 +365,95 @@ absl::StatusOr<SymmetricKey> SymmetricKey::Decode(absl::string_view encoded) {
 
 absl::StatusOr<std::string> SymmetricKey::Encode() const {
   // Generate a map containing the parameters that are set.
-  CborRef item(cbor_new_definite_map(3));
-  if (!cbor_map_add(item.get(),
-                    {BuildCborInt(CoseKeyParameter::kKty).get(),
-                     BuildCborInt(CoseKeyType::kSymmetric).get()}) ||
-      (algorithm &&
-       !cbor_map_add(item.get(), {BuildCborInt(CoseKeyParameter::kAlg).get(),
-                                  BuildCborInt(*algorithm).get()})) ||
-      (!k.empty() &&
-       !cbor_map_add(
-           item.get(),
-           {BuildCborInt(CoseKeyParameter::kSymmetricK).get(),
-            CborRef(cbor_build_bytestring(reinterpret_cast<cbor_data>(k.data()),
-                                          k.size()))
-                .get()}))) {
-    return absl::InvalidArgumentError("failed to encode symmetric key");
+  Map map;
+  map.add(CoseKeyParameter::kKty, CoseKeyType::kSymmetric);
+  if (algorithm) {
+    map.add(CoseKeyParameter::kAlg, *algorithm);
   }
-  return SerializeCborToString(*item);
+  if (!k.empty()) {
+    map.add(CoseKeyParameter::kSymmetricK, Bstr(k));
+  }
+  return map.toString();
 }
 
-absl::StatusOr<std::string> OkpCwt::BuildSigStructure(
+absl::StatusOr<std::string> OkpCwt::BuildSigStructureForSigning(
     absl::string_view aad) const {
   // See RFC 9052 section 4.4 for the contents of the signature structure.
-  CborRef signature_type(cbor_build_string("Signature1"));
-  FCP_ASSIGN_OR_RETURN(CborRef protected_header,
+  FCP_ASSIGN_OR_RETURN(std::vector<uint8_t> protected_header,
                        BuildCwtProtectedHeader(*this));
-  CborRef cbor_aad(cbor_build_bytestring(
-      reinterpret_cast<cbor_data>(aad.data()), aad.size()));
-  FCP_ASSIGN_OR_RETURN(CborRef payload, BuildCwtPayload(*this));
+  FCP_ASSIGN_OR_RETURN(std::vector<uint8_t> payload, BuildCwtPayload(*this));
+  return Array("Signature1", std::move(protected_header),
+               Bstr(aad.begin(), aad.end()), std::move(payload))
+      .toString();
+}
 
-  CborRef item(cbor_new_definite_array(4));
-  if (!cbor_array_push(item.get(), signature_type.get()) ||
-      !cbor_array_push(item.get(), protected_header.get()) ||
-      !cbor_array_push(item.get(), cbor_aad.get()) ||
-      !cbor_array_push(item.get(), payload.get())) {
-    return absl::InvalidArgumentError("failed to encode CWT sig structure");
+absl::StatusOr<std::string> OkpCwt::GetSigStructureForVerifying(
+    absl::string_view encoded, absl::string_view aad) {
+  auto [item, end_pos, error] = cppbor::parse(
+      reinterpret_cast<const uint8_t*>(encoded.data()), encoded.size());
+  if (!error.empty()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("failed to decode CoseSign1: ", error));
+  } else if (end_pos != reinterpret_cast<const uint8_t*>(encoded.data()) +
+                            encoded.size()) {
+    return absl::InvalidArgumentError(
+        "failed to decode CoseSign1: input contained extra data");
+  } else if (auto array = item->asArray();
+             array == nullptr || array->size() != 4 ||
+             array->get(0)->type() != cppbor::BSTR ||
+             array->get(2)->type() != cppbor::BSTR) {
+    return absl::InvalidArgumentError("CoseSign1 is invalid");
   }
-  return SerializeCborToString(*item);
+  return Array("Signature1", std::move(*item->asArray()->get(0)->asBstr()),
+               Bstr(aad.begin(), aad.end()),
+               std::move(*item->asArray()->get(2)->asBstr()))
+      .toString();
 }
 
 absl::StatusOr<OkpCwt> OkpCwt::Decode(absl::string_view encoded) {
-  cbor_load_result result;
-  CborRef item(cbor_load(reinterpret_cast<cbor_data>(encoded.data()),
-                         encoded.size(), &result));
-  if (!item || result.read != encoded.size()) {
-    return absl::InvalidArgumentError(absl::StrCat(
-        "failed to fully decode CWT (error ", result.error.code, ")"));
-  }
-  if (!cbor_isa_array(item.get()) || cbor_array_size(item.get()) != 4 ||
-      !cbor_isa_bytestring(CborRef(cbor_array_get(item.get(), 0)).get()) ||
-      !cbor_isa_map(CborRef(cbor_array_get(item.get(), 1)).get()) ||
-      !cbor_isa_bytestring(CborRef(cbor_array_get(item.get(), 2)).get()) ||
-      !cbor_isa_bytestring(CborRef(cbor_array_get(item.get(), 3)).get())) {
+  auto [item, end_pos, error] = cppbor::parse(
+      reinterpret_cast<const uint8_t*>(encoded.data()), encoded.size());
+  if (!error.empty()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("failed to decode CWT: ", error));
+  } else if (end_pos != reinterpret_cast<const uint8_t*>(encoded.data()) +
+                            encoded.size()) {
+    return absl::InvalidArgumentError(
+        "failed to decode CWT: input contained extra data");
+  } else if (auto array = item->asArray();
+             array == nullptr || array->size() != 4 ||
+             array->get(0)->type() != cppbor::BSTR ||
+             array->get(1)->type() != cppbor::MAP ||
+             array->get(2)->type() != cppbor::BSTR ||
+             array->get(3)->type() != cppbor::BSTR) {
     return absl::InvalidArgumentError("CWT is invalid");
   }
 
   // Extract the signature.
-  CborRef signature(cbor_array_get(item.get(), 3));
   OkpCwt cwt{
-      .signature = std::string(
-          reinterpret_cast<char*>(cbor_bytestring_handle(signature.get())),
-          cbor_bytestring_length(signature.get())),
+      .signature =
+          std::string(item->asArray()->get(3)->asBstr()->value().begin(),
+                      item->asArray()->get(3)->asBstr()->value().end()),
   };
 
-  // Parse the payload, which is a map of CWT claims.
-  CborRef serialized_payload(cbor_array_get(item.get(), 2));
-  CborRef payload(cbor_load(cbor_bytestring_handle(serialized_payload.get()),
-                            cbor_bytestring_length(serialized_payload.get()),
-                            &result));
-  if (!payload ||
-      result.read != cbor_bytestring_length(serialized_payload.get())) {
-    return absl::InvalidArgumentError(absl::StrCat(
-        "failed to fully decode CWT payload (error ", result.error.code, ")"));
-  } else if (!cbor_isa_map(payload.get())) {
-    return absl::InvalidArgumentError("CWT payload is invalid");
-  }
+  // Process the protected header and claims.
+  FCP_RETURN_IF_ERROR(
+      ParseCwtProtectedHeader(item->asArray()->get(0)->asBstr()->value(), cwt));
+  FCP_RETURN_IF_ERROR(
+      ParseCwtPayload(item->asArray()->get(2)->asBstr()->value(), cwt));
 
-  // Process the claims map.
-  const cbor_pair* claims = cbor_map_handle(payload.get());
-  const size_t claim_count = cbor_map_size(payload.get());
-  for (int i = 0; i < claim_count; ++i) {
-    absl::StatusOr<int64_t> key = GetCborInt(*claims[i].key);
-    if (!key.ok()) continue;  // Ignore other key types.
-    switch (*key) {
-      case CwtClaim::kExp:
-        if (!cbor_isa_uint(claims[i].value)) {
-          return absl::InvalidArgumentError(absl::StrCat(
-              "unsupported exp type ", cbor_typeof(claims[i].value)));
-        }
-        cwt.expiration_time =
-            absl::FromUnixSeconds(cbor_get_int(claims[i].value));
-        break;
-
-      case CwtClaim::kIat:
-        if (!cbor_isa_uint(claims[i].value)) {
-          return absl::InvalidArgumentError(absl::StrCat(
-              "unsupported iat type ", cbor_typeof(claims[i].value)));
-        }
-        cwt.issued_at = absl::FromUnixSeconds(cbor_get_int(claims[i].value));
-        break;
-
-      case CwtClaim::kOakPublicKey:
-      case CwtClaim::kPublicKey: {
-        if (!cbor_isa_bytestring(claims[i].value)) {
-          return absl::InvalidArgumentError(absl::StrCat(
-              "unsupported public_key type ", cbor_typeof(claims[i].value)));
-        }
-        FCP_ASSIGN_OR_RETURN(cwt.public_key,
-                             OkpKey::Decode(absl::string_view(
-                                 reinterpret_cast<char*>(
-                                     cbor_bytestring_handle(claims[i].value)),
-                                 cbor_bytestring_length(claims[i].value))));
-        break;
-      }
-
-      default:
-        break;
-    }
-  }
   return cwt;
 }
 
 absl::StatusOr<std::string> OkpCwt::Encode() const {
   // See RFC 9052 section 4.2 for the contents of the COSE_Sign1 structure.
-  FCP_ASSIGN_OR_RETURN(CborRef protected_header,
+  FCP_ASSIGN_OR_RETURN(std::vector<uint8_t> protected_header,
                        BuildCwtProtectedHeader(*this));
-  CborRef unprotected_header(cbor_new_definite_map(0));
-  FCP_ASSIGN_OR_RETURN(CborRef payload, BuildCwtPayload(*this));
-  CborRef cbor_signature(cbor_build_bytestring(
-      reinterpret_cast<cbor_data>(signature.data()), signature.size()));
-
-  CborRef item(cbor_new_definite_array(4));
-  if (!cbor_array_push(item.get(), protected_header.get()) ||
-      !cbor_array_push(item.get(), unprotected_header.get()) ||
-      !cbor_array_push(item.get(), payload.get()) ||
-      !cbor_array_push(item.get(), cbor_signature.get())) {
-    return absl::InvalidArgumentError("failed to encode CWT");
-  }
-  return SerializeCborToString(*item);
+  Map unprotected_header;
+  FCP_ASSIGN_OR_RETURN(std::vector<uint8_t> payload, BuildCwtPayload(*this));
+  return Array(std::move(protected_header), std::move(unprotected_header),
+               std::move(payload), Bstr(signature))
+      .toString();
 }
 
 }  // namespace fcp::confidential_compute

@@ -16,12 +16,14 @@
 #include "fcp/client/fl_runner.h"
 
 #include <fcntl.h>
+#include <openssl/base.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <functional>
-#include <map>
+#include <ios>
 #include <memory>
 #include <optional>
 #include <string>
@@ -30,24 +32,36 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/random/random.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/cord.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "fcp/base/clock.h"
+#include "fcp/base/digest.h"
 #include "fcp/base/monitoring.h"
 #include "fcp/base/platform.h"
 #include "fcp/client/cache/file_backed_resource_cache.h"
 #include "fcp/client/cache/resource_cache.h"
+#include "fcp/client/diag_codes.pb.h"
 #include "fcp/client/engine/common.h"
 #include "fcp/client/engine/engine.pb.h"
 #include "fcp/client/engine/example_iterator_factory.h"
 #include "fcp/client/engine/example_query_plan_engine.h"
 #include "fcp/client/engine/plan_engine_helpers.h"
+#include "fcp/client/federated_select.h"
+#include "fcp/client/http/http_client.h"
 #include "fcp/client/opstats/opstats_logger.h"
 #include "fcp/client/opstats/opstats_utils.h"
 #include "fcp/client/parsing_utils.h"
 #include "fcp/client/phase_logger.h"
+#include "fcp/client/stats.h"
+#include "tensorflow/core/platform/tstring.h"
+#include "tensorflow/core/platform/types.h"
 
 #ifdef FCP_CLIENT_SUPPORT_TFMOBILE
 #include "fcp/client/engine/simple_plan_engine.h"
@@ -58,7 +72,6 @@
 #include "fcp/client/event_publisher.h"
 #include "fcp/client/example_iterator_query_recorder.h"
 #include "fcp/client/federated_protocol.h"
-#include "fcp/client/federated_protocol_util.h"
 #include "fcp/client/files.h"
 #include "fcp/client/fl_runner.pb.h"
 #include "fcp/client/flags.h"
@@ -81,7 +94,6 @@
 #include "fcp/protos/plan.pb.h"
 #include "fcp/protos/population_eligibility_spec.pb.h"
 #include "openssl/digest.h"
-#include "openssl/evp.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor.pb.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
@@ -655,46 +667,6 @@ PlanResultAndCheckpointFile RunPlanWithExampleQuerySpec(
   return result;
 }
 
-void LogEligibilityEvalComputationOutcome(
-    PhaseLogger& phase_logger, engine::PlanResult plan_result,
-    const absl::Status& eligibility_info_parsing_status,
-    absl::Time run_plan_start_time, absl::Time reference_time) {
-  switch (plan_result.outcome) {
-    case engine::PlanOutcome::kSuccess: {
-      if (eligibility_info_parsing_status.ok()) {
-        phase_logger.LogEligibilityEvalComputationCompleted(
-            plan_result.example_stats, run_plan_start_time, reference_time);
-      } else {
-        phase_logger.LogEligibilityEvalComputationTensorflowError(
-            eligibility_info_parsing_status, plan_result.example_stats,
-            run_plan_start_time, reference_time);
-        FCP_LOG(ERROR) << eligibility_info_parsing_status.message();
-      }
-      break;
-    }
-    case engine::PlanOutcome::kInterrupted:
-      phase_logger.LogEligibilityEvalComputationInterrupted(
-          plan_result.original_status, plan_result.example_stats,
-          run_plan_start_time, reference_time);
-      break;
-    case engine::PlanOutcome::kInvalidArgument:
-      phase_logger.LogEligibilityEvalComputationInvalidArgument(
-          plan_result.original_status, plan_result.example_stats,
-          run_plan_start_time);
-      break;
-    case engine::PlanOutcome::kTensorflowError:
-      phase_logger.LogEligibilityEvalComputationTensorflowError(
-          plan_result.original_status, plan_result.example_stats,
-          run_plan_start_time, reference_time);
-      break;
-    case engine::PlanOutcome::kExampleIteratorError:
-      phase_logger.LogEligibilityEvalComputationExampleIteratorError(
-          plan_result.original_status, plan_result.example_stats,
-          run_plan_start_time);
-      break;
-  }
-}
-
 void LogNativeEligibilityEvalComputationOutcome(PhaseLogger& phase_logger,
                                                 absl::Status status,
                                                 absl::Time run_plan_start_time,
@@ -887,24 +859,20 @@ absl::StatusOr<std::string> CreateInputCheckpointFile(
   return filename;
 }
 
-absl::StatusOr<std::optional<TaskEligibilityInfo>>
-MaybeComputeNativeEligibility(
-    const FederatedProtocol::EligibilityEvalTask& eligibility_eval_task,
+absl::StatusOr<std::optional<TaskEligibilityInfo>> ComputeNativeEligibility(
+    const PopulationEligibilitySpec& population_eligibility_spec,
     LogManager& log_manager, PhaseLogger& phase_logger,
     OpStatsLogger* opstats_logger, Clock& clock,
     std::vector<engine::ExampleIteratorFactory*> example_iterator_factories,
-    bool neet_tf_custom_policy_support, EetPlanRunner& eet_plan_runner,
-    const Flags* flags) {
+    EetPlanRunner& eet_plan_runner, const Flags* flags) {
   FCP_ASSIGN_OR_RETURN(opstats::OpStatsSequence opstats_sequence,
                        opstats_logger->GetOpStatsDb()->Read());
 
   FCP_ASSIGN_OR_RETURN(
       TaskEligibilityInfo task_eligibility_info,
-      ComputeEligibility(
-          eligibility_eval_task.population_eligibility_spec.value(),
-          log_manager, phase_logger, opstats_sequence, clock,
-          example_iterator_factories, neet_tf_custom_policy_support,
-          eet_plan_runner, flags));
+      ComputeEligibility(population_eligibility_spec, log_manager, phase_logger,
+                         opstats_sequence, clock, example_iterator_factories,
+                         eet_plan_runner, flags));
 
   if (task_eligibility_info.task_weights_size() == 0) {
     // Eligibility could not be decided.
@@ -937,6 +905,8 @@ absl::StatusOr<std::optional<TaskEligibilityInfo>> RunEligibilityEvalPlan(
     return absl::InternalError(message);
   }
 
+  // TODO: b/325189386 - Remove checkpoint usage as native eligibility eval does
+  // not require the checkpoint anymore.
   absl::StatusOr<std::string> checkpoint_input_filename =
       CreateInputCheckpointFile(files,
                                 eligibility_eval_task.payloads.checkpoint);
@@ -960,12 +930,13 @@ absl::StatusOr<std::optional<TaskEligibilityInfo>> RunEligibilityEvalPlan(
   absl::Time run_computation_start_time = absl::Now();
   phase_logger.LogEligibilityEvalComputationStarted();
 
-  // It's a bit of a waste to create the input checkpoint file etc above if we
-  // don't end up using it due to a successful native eet computation, but it's
-  // worth it to get consistent phase logs that allows us to compare native eets
-  // to legacy eets.
-  if (flags->enable_native_eets() &&
-      eligibility_eval_task.population_eligibility_spec.has_value()) {
+  absl::StatusOr<std::optional<TaskEligibilityInfo>>
+      native_task_eligibility_info = std::nullopt;
+
+  // population_eligibility_spec should always be set at this point, but just in
+  // case we somehow get a legacy EET with no spec, we can skip evaluating this
+  // and opt the client out of all tasks.
+  if (eligibility_eval_task.population_eligibility_spec.has_value()) {
     std::function<engine::PlanResult(
         std::vector<engine::ExampleIteratorFactory*>)>
         run_plan_func = [&should_abort, &log_manager, &opstats_logger, &flags,
@@ -989,40 +960,17 @@ absl::StatusOr<std::optional<TaskEligibilityInfo>> RunEligibilityEvalPlan(
 
     // TODO(team): Return ExampleStats out of the NEET engine so they can
     // be measured.
-    absl::StatusOr<std::optional<TaskEligibilityInfo>>
-        native_task_eligibility_info = MaybeComputeNativeEligibility(
-            eligibility_eval_task, *log_manager, phase_logger, opstats_logger,
-            clock, example_iterator_factories,
-            flags->neet_tf_custom_policy_support(), eet_plan_runner, flags);
-
-    // If native_task_eligibility_info has an OK status, and the wrapped
-    // optional contains a value, OR if we have a not-OK status, we should log
-    // and return. We don't log and return if we have an OK status but an empty
-    // optional, because that means we need to fall back to evaluating the
-    // legacy eet.
-    if ((native_task_eligibility_info.ok() &&
-         native_task_eligibility_info->has_value()) ||
-        !native_task_eligibility_info.ok()) {
-      LogNativeEligibilityEvalComputationOutcome(
-          phase_logger, native_task_eligibility_info.status(),
-          run_computation_start_time, reference_time);
-      return native_task_eligibility_info;
-    }
+    native_task_eligibility_info = ComputeNativeEligibility(
+        eligibility_eval_task.population_eligibility_spec.value(), *log_manager,
+        phase_logger, opstats_logger, clock, example_iterator_factories,
+        eet_plan_runner, flags);
   }
 
-  engine::PlanResult plan_result = RunEligibilityEvalPlanWithTensorflowSpec(
-      example_iterator_factories, should_abort, log_manager, opstats_logger,
-      flags, plan, *checkpoint_input_filename, timing_config,
+  LogNativeEligibilityEvalComputationOutcome(
+      phase_logger, native_task_eligibility_info.status(),
       run_computation_start_time, reference_time);
-  absl::StatusOr<TaskEligibilityInfo> task_eligibility_info;
-  if (plan_result.outcome == engine::PlanOutcome::kSuccess) {
-    task_eligibility_info =
-        ParseEligibilityEvalPlanOutput(plan_result.output_tensors);
-  }
-  LogEligibilityEvalComputationOutcome(
-      phase_logger, std::move(plan_result), task_eligibility_info.status(),
-      run_computation_start_time, reference_time);
-  return task_eligibility_info;
+
+  return native_task_eligibility_info;
 }
 
 struct EligibilityEvalResult {
@@ -1310,7 +1258,15 @@ absl::StatusOr<CheckinResult> CreateCheckinResultFromTaskAssignment(
 
   std::string computation_id;
   if (flags->enable_computation_id()) {
-    computation_id = ComputeSHA256FromStringOrCord(plan_bytes);
+    if (flags->use_correct_sha256_impl_for_computation_id()) {
+      if (std::holds_alternative<std::string>(plan_bytes)) {
+        computation_id = ComputeSHA256(std::get<std::string>(plan_bytes));
+      } else {
+        computation_id = ComputeSHA256(std::get<absl::Cord>(plan_bytes));
+      }
+    } else {
+      computation_id = ComputeSHA256FromStringOrCord(plan_bytes);
+    }
   }
 
   int32_t minimum_clients_in_server_visible_aggregate = 0;
@@ -1820,20 +1776,18 @@ RunPlanResults RunComputation(
 
   std::string checkpoint_output_filename;
   bool task_requires_output_checkpoint = true;
-  if (flags->skip_empty_output_checkpoints()) {
-    // A task does not require an output checkpoint if it is a lightweight task
-    // and the new client report format is enabled, or if all of the outputs are
-    // aggregated with secagg.
-    if (flags->enable_lightweight_client_report_wire_format() &&
-        checkin_result->plan.phase().has_example_query_spec()) {
-      task_requires_output_checkpoint = false;
-    } else if (checkin_result->plan.phase().has_federated_compute() &&
-               checkin_result->plan.phase()
-                   .federated_compute()
-                   .output_filepath_tensor_name()
-                   .empty()) {
-      task_requires_output_checkpoint = false;
-    }
+  // A task does not require an output checkpoint if it is a lightweight task
+  // and the new client report format is enabled, or if all of the outputs are
+  // aggregated with secagg.
+  if (flags->enable_lightweight_client_report_wire_format() &&
+      checkin_result->plan.phase().has_example_query_spec()) {
+    task_requires_output_checkpoint = false;
+  } else if (checkin_result->plan.phase().has_federated_compute() &&
+             checkin_result->plan.phase()
+                 .federated_compute()
+                 .output_filepath_tensor_name()
+                 .empty()) {
+    task_requires_output_checkpoint = false;
   }
   if (task_requires_output_checkpoint) {
     absl::StatusOr<std::string> output_filename =
@@ -1977,7 +1931,7 @@ absl::StatusOr<FLRunnerResult> RunFederatedComputation(
     const std::string& test_cert_path, const std::string& session_name,
     const std::string& population_name, const std::string& retry_token,
     const std::string& client_version,
-    const std::string& attestation_measurement) {
+    const std::string& client_attestation_measurement) {
   auto opstats_logger =
       engine::CreateOpStatsLogger(env_deps->GetBaseDir(), flags, log_manager,
                                   session_name, population_name);
@@ -2050,13 +2004,15 @@ absl::StatusOr<FLRunnerResult> RunFederatedComputation(
           absl::StartsWith(federated_service_uri, "http://localhost"))) {
       return absl::InvalidArgumentError("The entry point uri is invalid.");
     }
+
     federated_protocol = std::make_unique<http::HttpFederatedProtocol>(
         clock, log_manager, flags, http_client.get(),
         std::make_unique<SecAggRunnerFactoryImpl>(),
-        event_publisher->secagg_event_publisher(), federated_service_uri,
-        api_key, population_name, retry_token, client_version,
-        attestation_measurement, should_abort_protocol_callback, absl::BitGen(),
-        timing_config, resource_cache.get());
+        event_publisher->secagg_event_publisher(), resource_cache.get(),
+        env_deps->CreateAttestationVerifier(), federated_service_uri, api_key,
+        population_name, retry_token, client_version,
+        client_attestation_measurement, should_abort_protocol_callback,
+        absl::BitGen(), timing_config);
   } else {
 #ifdef FCP_CLIENT_SUPPORT_GRPC
     // Check in with the server to either retrieve a plan + initial checkpoint,
@@ -2072,7 +2028,7 @@ absl::StatusOr<FLRunnerResult> RunFederatedComputation(
         event_publisher, log_manager,
         std::make_unique<SecAggRunnerFactoryImpl>(), flags, http_client.get(),
         federated_service_uri, api_key, test_cert_path, population_name,
-        retry_token, client_version, attestation_measurement,
+        retry_token, client_version, client_attestation_measurement,
         should_abort_protocol_callback, timing_config, grpc_channel_deadline,
         resource_cache.get());
 #else
@@ -2151,7 +2107,7 @@ absl::StatusOr<FLRunnerResult> RunFederatedComputation(
   // Eligibility eval plans can use example iterators from the
   // SimpleTaskEnvironment and those reading the OpStats DB.
   opstats::OpStatsExampleIteratorFactory opstats_example_iterator_factory(
-      opstats_logger, log_manager, flags->neet_tf_custom_policy_support());
+      opstats_logger, log_manager);
   // This iterator factory is used by the task to query the environment's
   // example store for eligibility, and thus does not log first access time
   // since we do not implement example-level SWOR for eligibility.
@@ -2280,7 +2236,8 @@ FLRunnerTensorflowSpecResult RunPlanWithTensorflowSpecForTesting(
     const ClientOnlyPlan& client_plan,
     const std::string& checkpoint_input_filename,
     const fcp::client::InterruptibleRunner::TimingConfig& timing_config,
-    const absl::Time run_plan_start_time, const absl::Time reference_time) {
+    const absl::Time run_plan_start_time, const absl::Time reference_time,
+    std::optional<PopulationEligibilitySpec> population_eligibility_spec) {
   FLRunnerTensorflowSpecResult result;
   result.set_outcome(engine::PhaseOutcome::ERROR);
   engine::PlanResult plan_result(engine::PlanOutcome::kTensorflowError,
@@ -2288,6 +2245,7 @@ FLRunnerTensorflowSpecResult RunPlanWithTensorflowSpecForTesting(
   std::function<bool()> should_abort = [env_deps, &timing_config]() {
     return env_deps->ShouldAbort(absl::Now(), timing_config.polling_period);
   };
+  Clock* clock = Clock::RealClock();
 
   auto opstats_logger =
       engine::CreateOpStatsLogger(env_deps->GetBaseDir(), flags, log_manager,
@@ -2305,8 +2263,7 @@ FLRunnerTensorflowSpecResult RunPlanWithTensorflowSpecForTesting(
   // Eligibility eval plans can only use iterators from the
   // SimpleTaskEnvironment and those reading the OpStats DB.
   opstats::OpStatsExampleIteratorFactory opstats_example_iterator_factory(
-      opstats_logger.get(), log_manager,
-      flags->neet_tf_custom_policy_support());
+      opstats_logger.get(), log_manager);
   std::unique_ptr<engine::ExampleIteratorFactory> env_example_iterator_factory =
       CreateSimpleTaskEnvironmentIteratorFactory(env_deps, SelectorContext(),
                                                  &phase_logger, flags, true);
@@ -2336,11 +2293,52 @@ FLRunnerTensorflowSpecResult RunPlanWithTensorflowSpecForTesting(
         plan_result_and_checkpoint_file.checkpoint_filename);
     plan_result = std::move(plan_result_and_checkpoint_file.plan_result);
   } else if (client_plan.phase().has_federated_compute_eligibility()) {
-    // Eligibility eval plans.
-    plan_result = RunEligibilityEvalPlanWithTensorflowSpec(
-        example_iterator_factories, should_abort, log_manager,
-        opstats_logger.get(), flags, client_plan, checkpoint_input_filename,
-        timing_config, run_plan_start_time, reference_time);
+    if (population_eligibility_spec.has_value()) {
+      std::function<engine::PlanResult(
+          std::vector<engine::ExampleIteratorFactory*>)>
+          run_plan_func =
+              [&should_abort, &log_manager, &opstats_logger, &flags,
+               &client_plan, &checkpoint_input_filename, &timing_config,
+               &run_plan_start_time,
+               &reference_time](std::vector<engine::ExampleIteratorFactory*>
+                                    override_iterator_factories) {
+                return RunEligibilityEvalPlanWithTensorflowSpec(
+                    override_iterator_factories, should_abort, log_manager,
+                    opstats_logger.get(), flags, client_plan,
+                    checkpoint_input_filename, timing_config,
+                    run_plan_start_time, reference_time);
+              };
+
+      std::function<absl::StatusOr<TaskEligibilityInfo>(
+          std::vector<tensorflow::Tensor>)>
+          parse_output_func =
+              [](std::vector<tensorflow::Tensor> output_tensors) {
+                return ParseEligibilityEvalPlanOutput(output_tensors);
+              };
+
+      EetPlanRunnerImpl eet_plan_runner(run_plan_func, parse_output_func);
+
+      absl::StatusOr<std::optional<TaskEligibilityInfo>>
+          native_task_eligibility_info = ComputeNativeEligibility(
+              population_eligibility_spec.value(), *log_manager, phase_logger,
+              opstats_logger.get(), *clock, example_iterator_factories,
+              eet_plan_runner, flags);
+
+      if (native_task_eligibility_info.ok()) {
+        plan_result =
+            engine::PlanResult(engine::PlanOutcome::kSuccess, absl::OkStatus());
+      } else {
+        plan_result = engine::PlanResult(engine::PlanOutcome::kTensorflowError,
+                                         native_task_eligibility_info.status());
+      }
+    } else {
+      // Legacy eligibility eval plan.
+      plan_result = RunEligibilityEvalPlanWithTensorflowSpec(
+          example_iterator_factories, should_abort, log_manager,
+          opstats_logger.get(), flags, client_plan, checkpoint_input_filename,
+          timing_config, run_plan_start_time, reference_time);
+    }
+
   } else {
     // This branch shouldn't be taken, unless we add an additional type of
     // TensorflowSpec-based plan in the future. We return a readable error so
