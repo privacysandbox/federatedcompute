@@ -15,7 +15,7 @@
 load("//fcp:config.bzl", "FCP_COPTS")
 
 package(
-    default_visibility = ["//fcp/aggregation:internal"],
+    default_visibility = ["//fcp:internal"],
     licenses = ["notice"],  # Apache 2.0
 )
 

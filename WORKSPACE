@@ -360,7 +360,8 @@ http_archive(
 
 http_archive(
     name = "org_tensorflow_federated",
-    url = "https://github.com/tensorflow/federated/archive/93ffd03340d021a336994ace52ea6919b1821ff5.tar.gz",
-    sha256 = "247295d40ab2c78c22dec44b36a427fa143bb5a343a3a46f91fcddad5ac2ee07",
-    strip_prefix = "federated-93ffd03340d021a336994ace52ea6919b1821ff5",
+    sha256 = "a993d0682b8381acb37a9dd8197bfc7398a5877f13fea0db5e741bb056357441",
+    strip_prefix = "federated-9c5a51af41fccc8e720a63aa754465767113877d",
+    url = "https://github.com/tensorflow/federated/archive/9c5a51af41fccc8e720a63aa754465767113877d.tar.gz",
 )
+

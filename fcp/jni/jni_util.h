@@ -23,8 +23,49 @@
 #include "absl/container/fixed_array.h"
 #include "fcp/base/monitoring.h"
 
+// Checks whether a JNI call failed. This is meant to be called right after any
+// JNI call, to detect error conditions as early as possible. For functions that
+// need to return "void" on failure you can specify "void()" as the return_val.
+#define JNI_FAILURE_CHECK(env, return_val)              \
+  while (ABSL_PREDICT_FALSE((env)->ExceptionCheck())) { \
+    env->ExceptionClear();                              \
+    return return_val;                                  \
+  }
+
 namespace fcp {
 namespace jni {
+
+static inline std::string JbyteArrayToString(JNIEnv* env, jbyteArray arr) {
+  int len = env->GetArrayLength(arr);
+  char* buf = new char[len];
+  std::unique_ptr<char[]> buf_uptr(buf);
+  env->GetByteArrayRegion(arr, 0, len, reinterpret_cast<jbyte*>(buf));
+  std::string result(buf, len);
+  return result;
+}
+
+// Throws an exception of the given class. The exception is expected to have
+// a two-argument constructor, where the first argument represents a canonical
+// error code, and the second argument is the exception message.
+//
+// If errors occur during exception construction, a runtime exception
+// will be thrown instead, or if that fails, the process will be aborted.
+// After this method returns an exception will always be set in the JNI env.
+static void ThrowCustomStatusCodeException(JNIEnv* env,
+                                           const std::string& exception_class,
+                                           int code,
+                                           const std::string& message) {
+  jclass excl = env->FindClass(exception_class.c_str());
+  JNI_FAILURE_CHECK(env, void());
+  jmethodID ctor = env->GetMethodID(excl, "<init>", "(ILjava/lang/String;)V");
+  JNI_FAILURE_CHECK(env, void());
+  jstring message_object = env->NewStringUTF(message.c_str());
+  JNI_FAILURE_CHECK(env, void());
+  jthrowable ex =
+          (jthrowable)(env->NewObject(excl, ctor, code, message_object));
+  JNI_FAILURE_CHECK(env, void());
+  env->Throw(ex);
+}
 
 // Creates a JNIEnv via the passed JavaVM*, attaching the current thread if it
 // is not already. If an attach was needed, detaches when this is destroyed.

@@ -47,29 +47,6 @@ using fcp::jni::SerializeProtoToJByteArray;
 namespace fcp {
 namespace jni {
 
-// Throws an exception of the given class. The exception is expected to have
-// a two-argument constructor, where the first argument represents a canonical
-// error code, and the second argument is the exception message.
-//
-// If errors occur during exception construction, a runtime exception
-// will be thrown instead, or if that fails, the process will be aborted.
-// After this method returns an exception will always be set in the JNI env.
-static void ThrowCustomStatusCodeException(JNIEnv* env,
-                                           const std::string& exception_class,
-                                           int code,
-                                           const std::string& message) {
-  jclass excl = env->FindClass(exception_class.c_str());
-  JNI_FAILURE_CHECK(env, void());
-  jmethodID ctor = env->GetMethodID(excl, "<init>", "(ILjava/lang/String;)V");
-  JNI_FAILURE_CHECK(env, void());
-  jstring message_object = env->NewStringUTF(message.c_str());
-  JNI_FAILURE_CHECK(env, void());
-  jthrowable ex =
-      (jthrowable)(env->NewObject(excl, ctor, code, message_object));
-  JNI_FAILURE_CHECK(env, void());
-  env->Throw(ex);
-}
-
 static std::string JStringToString(JNIEnv* env, jstring jstr) {
   if (jstr == nullptr) {
     return std::string();

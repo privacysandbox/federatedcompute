@@ -25,6 +25,9 @@ filegroup(
         "init_checkpoint.ckp",
         "intermediate_10x_checkpoint.ckp",
         "intermediate_checkpoint.ckp",
+        "keras_checkpoint_v2.ckp",
+        "keras_gradient_v2.ckp",
+        "keras_plan_v2.pb",
         "plan.pb",
     ],
 )

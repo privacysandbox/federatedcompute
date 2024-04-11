@@ -61,6 +61,14 @@ cc_proto_library(
     ],
 )
 
+java_proto_library(
+    name = "configuration_java_proto",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":configuration_proto",
+    ],
+)
+
 py_proto_library(
     name = "configuration_py_pb2",
     deps = [

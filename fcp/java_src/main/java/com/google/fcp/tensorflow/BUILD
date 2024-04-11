@@ -20,7 +20,6 @@ package(
 java_library(
     name = "tensorflow",
     srcs = [
-        "NativeHandle.java",
         "TensorflowException.java",
         "TensorflowSession.java",
     ],
@@ -30,12 +29,19 @@ java_library(
     deps = [
         ":app_files",
         ":file_util",
+        ":native_handle",
         ":protos_all_java_proto",
         "//fcp/protos:plan_java_proto",
         "@com_google_protobuf//java/core",
         "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",
     ],
+)
+
+java_library(
+    name = "native_handle",
+    srcs = ["NativeHandle.java"],
+    deps = ["@maven//:com_google_guava_guava"],
 )
 
 java_library(
@@ -62,5 +68,5 @@ java_proto_library(
 java_library(
     name = "tensorflow_exception",
     srcs = ["TensorflowException.java"],
-    deps=[],
+    deps = [],
 )
