@@ -1,5 +1,7 @@
 # Federated Compute Platform
 
+This is a fork of [federated-compute](https://github.com/google-parfait/federated-compute/tree/main) maintained for use in [odp-federatedcompute](https://github.com/privacysandbox/odp-federatedcompute).
+
 This repository hosts code for executing federated programs and computations.
 
 ## Definitions
