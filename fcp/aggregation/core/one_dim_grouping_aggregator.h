@@ -20,77 +20,146 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "fcp/aggregation/core/agg_core.pb.h"
 #include "fcp/aggregation/core/agg_vector.h"
 #include "fcp/aggregation/core/datatype.h"
 #include "fcp/aggregation/core/input_tensor_list.h"
+#include "fcp/aggregation/core/intrinsic.h"
 #include "fcp/aggregation/core/mutable_vector_data.h"
 #include "fcp/aggregation/core/tensor.h"
 #include "fcp/aggregation/core/tensor_aggregator.h"
+#include "fcp/aggregation/core/tensor_aggregator_factory.h"
 #include "fcp/aggregation/core/tensor_shape.h"
 #include "fcp/base/monitoring.h"
 
 namespace fcp {
 namespace aggregation {
 
-// OneDimGroupingAggregator class is a specialization of TensorAggregator which
-// takes in a tensor containing ordinals and a tensor containing values, and
-// accumulates the values into the output positions indicated by the
-// corresponding ordinals.
+// OneDimBaseGroupingAggregator class is a specialization of TensorAggregator
+// which is used as a base class for typed OneDimGroupingAggregator instances.
 //
-// Currently only 1D input tensors are supported.
+// It operates over lists of two tensors, where the first tensor contains
+// ordinals and the second tensor contains values. Currently only 1D input
+// tensors are supported.
+//
+// The specific means of accumulating, merging, and producing default values
+// are left to the subclasses.
+//
+// This class is not thread safe.
+class OneDimBaseGroupingAggregator : public TensorAggregator {
+ public:
+  Status MergeWith(TensorAggregator&& other) override;
+
+  StatusOr<std::string> Serialize() && override {
+    // OneDimBaseGroupingAggregators are always nested within an outer
+    // aggregator. Use ToProto to get intermediate state and then serialize the
+    // outer aggregator state instead.
+    return FCP_STATUS(UNIMPLEMENTED)
+           << "OneDimBaseGroupingAggregator::Serialize is not supported. Use "
+              "ToProto to store intermediate state.";
+  }
+
+  // Merges intermediate aggregates contained in the tensors param into the
+  // current Aggregator instance. Expects a tensors param of size 2, where the
+  // first tensor contains ordinals and the second tensor contains values. The
+  // num_inputs param specifies how many inputs were pre-accumulated into the
+  // tensors input.
+  //
+  // The provided ordinals should correspond to the key->ordinal mapping used by
+  // the GroupByAggregator into which the values are being merged, as opposed to
+  // the key->ordinal mapping used by the GroupByAggregator that accumulated the
+  // values that are now being merged. The GroupBy aggregator is responsible for
+  // providing the correct ordinals.
+  //
+  // The actual implementation of the merge operation is to be provided by a
+  // derived class.
+  virtual Status MergeTensors(InputTensorList tensors, int num_inputs) = 0;
+
+  // Stores the intermediate state of the OneDimBaseGroupingAggregator as a
+  // proto.
+  virtual OneDimGroupingAggregatorState ToProto() = 0;
+
+ protected:
+  // Checks that the input tensors param is valid.
+  Status ValidateTensorInputs(const InputTensorList& tensors);
+};
+
+class OneDimBaseGroupingAggregatorFactory : public TensorAggregatorFactory {
+ public:
+  StatusOr<std::unique_ptr<TensorAggregator>> Create(
+      const Intrinsic& intrinsic) const override {
+    return CreateInternal(intrinsic, nullptr);
+  }
+
+  StatusOr<std::unique_ptr<TensorAggregator>> Deserialize(
+      const Intrinsic& intrinsic, std::string serialized_state) const override {
+    OneDimGroupingAggregatorState aggregator_state;
+    // OneDimGroupingAggregators are always nested within an outer aggregator.
+    // Use FromProto to create the aggregator from intermediate state stored by
+    // the outer aggregator.
+    return FCP_STATUS(UNIMPLEMENTED)
+           << "OneDimBaseGroupingAggregatorFactory::Deserialize is not "
+              "supported. Use FromProto to create an aggregator from "
+              "intermediate state.";
+  }
+
+  // Creates a OneDimBaseGroupingAggregator from intermediate state.
+  StatusOr<std::unique_ptr<TensorAggregator>> FromProto(
+      const Intrinsic& intrinsic,
+      const OneDimGroupingAggregatorState& aggregator_state) const {
+    return CreateInternal(intrinsic, &aggregator_state);
+  }
+
+ private:
+  virtual StatusOr<std::unique_ptr<TensorAggregator>> CreateInternal(
+      const Intrinsic& intrinsic,
+      const OneDimGroupingAggregatorState* aggregator_state) const = 0;
+};
+
+// OneDimGroupingAggregator class is a specialization of
+// OneDimBaseGroupingAggregator.
 //
 // The specific means of accumulating values and producing default values are
-// left to the subclass.
+// left to the subclasses.
 //
 // The implementation operates on AggVector<T> instances rather than tensors.
 //
 // This class is not thread safe.
 template <typename InputT, typename OutputT = InputT>
-class OneDimGroupingAggregator : public TensorAggregator {
+class OneDimGroupingAggregator : public OneDimBaseGroupingAggregator {
  public:
   // TODO(team): Support accumulating tensors of multiple dimensions. In
   // that case, the size of all dimensions but one (the dimension corresponding
   // to the ordinal tensor) should be known in advance and thus this constructor
   // should take in a shape with a single unknown dimension.
   OneDimGroupingAggregator()
-      : data_vector_(std::make_unique<MutableVectorData<OutputT>>()),
-        num_inputs_(0) {}
+      : OneDimGroupingAggregator(std::make_unique<MutableVectorData<OutputT>>(),
+                                 0) {}
 
-  Status MergeWith(TensorAggregator&& other) override {
-    FCP_RETURN_IF_ERROR(CheckValid());
-    OneDimGroupingAggregator<InputT, OutputT>* other_ptr =
-        dynamic_cast<OneDimGroupingAggregator<InputT, OutputT>*>(&other);
-    if (other_ptr == nullptr) {
+  OneDimGroupingAggregator(std::unique_ptr<MutableVectorData<OutputT>> data,
+                           int num_inputs)
+      : data_vector_(std::move(data)), num_inputs_(num_inputs) {}
+
+  // Implementation of the tensor merge operation.
+  Status MergeTensors(InputTensorList tensors, int num_inputs) override {
+    FCP_RETURN_IF_ERROR(ValidateTensorInputs(tensors));
+
+    const Tensor* tensor = tensors[1];
+    if (tensor->dtype() != internal::TypeTraits<OutputT>::kDataType) {
       return FCP_STATUS(INVALID_ARGUMENT)
-             << "OneDimGroupingAggregator::MergeOutputTensors: Can only merge "
-                "with another GroupingAggregator with the same input data type "
-             << internal::TypeTraits<InputT>::kDataType
-             << " producing the same dtype "
-             << internal::TypeTraits<OutputT>::kDataType;
+             << "OneDimGroupingAggregator::MergeTensors: dtype mismatch "
+                "for tensor 1";
     }
-    FCP_RETURN_IF_ERROR((*other_ptr).CheckValid());
-    int other_num_inputs = other.GetNumInputs();
-    OutputTensorList output_tensors = std::move(*other_ptr).TakeOutputs();
+    num_inputs_ += num_inputs;
+    AggVector<OutputT> value_vector = tensor->AsAggVector<OutputT>();
+    AggVector<int64_t> ordinals_vector = tensors[0]->AsAggVector<int64_t>();
 
-    if (output_tensors.size() == 1) {
-      AggVector<OutputT> other_data_vector =
-          output_tensors[0].AsAggVector<OutputT>();
-      if (other_data_vector.size() > data_vector_->size()) {
-        data_vector_->resize(other_data_vector.size(), GetDefaultValue());
-      }
-      AggregateVector(other_data_vector);
-    } else {
-      // An empty output is valid and merging it into the current
-      // GroupingAggregator is a no-op.
-      FCP_CHECK(output_tensors.empty())
-          << "OneDimGroupingAggregator::MergeOutputTensors: GroupingAggregator "
-             "should produce at most a single output tensor.";
-    }
-
-    num_inputs_ += other_num_inputs;
+    ResizeDataVector(ordinals_vector);
+    MergeVectorByOrdinals(ordinals_vector, value_vector);
     return FCP_STATUS(OK);
   }
 
@@ -105,6 +174,13 @@ class OneDimGroupingAggregator : public TensorAggregator {
     return FCP_STATUS(OK);
   }
 
+  OneDimGroupingAggregatorState ToProto() override {
+    OneDimGroupingAggregatorState aggregator_state;
+    aggregator_state.set_num_inputs(num_inputs_);
+    *(aggregator_state.mutable_vector_data()) = data_vector_->EncodeContent();
+    return aggregator_state;
+  }
+
  protected:
   // Provides mutable access to the aggregator data as a vector<T>
   inline std::vector<OutputT>& data() { return *data_vector_; }
@@ -116,49 +192,19 @@ class OneDimGroupingAggregator : public TensorAggregator {
   // Accumulates the values into the positions in the output tensor which are
   // indicated by the corresponding ordinals.
   Status AggregateTensors(InputTensorList tensors) override {
-    FCP_CHECK(tensors.size() == 2)
-        << "OneDimGroupingAggregator should operate on 2 input tensors";
+    FCP_RETURN_IF_ERROR(ValidateTensorInputs(tensors));
 
-    const Tensor* ordinals = tensors[0];
-    if (ordinals->dtype() != DT_INT64) {
-      return FCP_STATUS(INVALID_ARGUMENT)
-             << "OneDimGroupingAggregator::AggregateTensors: dtype mismatch "
-                "for tensor 0. Expected DT_INT64.";
-    }
     const Tensor* tensor = tensors[1];
     if (tensor->dtype() != internal::TypeTraits<InputT>::kDataType) {
       return FCP_STATUS(INVALID_ARGUMENT)
              << "OneDimGroupingAggregator::AggregateTensors: dtype mismatch "
                 "for tensor 1";
     }
-    if (ordinals->shape() != tensor->shape()) {
-      return FCP_STATUS(INVALID_ARGUMENT)
-             << "OneDimGroupingAggregator::AggregateTensors: tensor shape "
-                "mismatch. Shape of both tensors must be the same.";
-    }
-    int num_dimensions = tensor->shape().dim_sizes().size();
-    if (num_dimensions > 1) {
-      return FCP_STATUS(INVALID_ARGUMENT)
-             << "OneDimGroupingAggregator::AggregateTensors: Only 1 "
-                "dimensional tensors supported. Input tensor has "
-             << num_dimensions << " dimensions.";
-    }
-    if (!ordinals->is_dense() || !tensor->is_dense()) {
-      return FCP_STATUS(INVALID_ARGUMENT)
-             << "OneDimGroupingAggregator::AggregateTensors: Only dense "
-                "tensors are supported.";
-    }
     num_inputs_++;
     AggVector<InputT> value_vector = tensor->AsAggVector<InputT>();
-    AggVector<int64_t> ordinals_vector = ordinals->AsAggVector<int64_t>();
-    size_t final_size = data_vector_->size();
-    for (auto o : ordinals_vector) {
-      if (o.value >= final_size) {
-        final_size = o.value + 1;
-      }
-    }
-    // Resize once outside the loop to avoid quadratic behavior.
-    data_vector_->resize(final_size, GetDefaultValue());
+    AggVector<int64_t> ordinals_vector = tensors[0]->AsAggVector<int64_t>();
+
+    ResizeDataVector(ordinals_vector);
     AggregateVectorByOrdinals(ordinals_vector, value_vector);
     return FCP_STATUS(OK);
   }
@@ -178,7 +224,7 @@ class OneDimGroupingAggregator : public TensorAggregator {
     return outputs;
   }
 
-  // Delegates AggVector aggregation by ordinal to a derived class.
+  // Delegates AggVector accumulation by ordinal to a derived class.
   //
   // The size of the vector returned by data() must be greater than the largest
   // ordinal in this vector.
@@ -191,20 +237,65 @@ class OneDimGroupingAggregator : public TensorAggregator {
       const AggVector<int64_t>& ordinals_vector,
       const AggVector<InputT>& value_vector) = 0;
 
-  // Delegates AggVector aggregation to a derived class.
+  // Delegates AggVector merging by ordinal to a derived class.
   //
-  // This vector must be the same size as the vector returned by data().
+  // The size of the vector returned by data() must be greater than the largest
+  // ordinal in this vector.
   //
   // To avoid making a virtual function call per value in the tensor, the whole
   // vector is passed to the subclass for aggregation, which provides better
   // performance but comes at the cost of duplicated code between subclasses for
   // iterating over the vectors.
-  virtual void AggregateVector(const AggVector<OutputT>& agg_vector) = 0;
+  virtual void MergeVectorByOrdinals(
+      const AggVector<int64_t>& ordinals_vector,
+      const AggVector<OutputT>& value_vector) = 0;
 
   // Delegates initialization of previously unseen ordinals to a derived class.
   virtual OutputT GetDefaultValue() = 0;
 
  private:
+  Status ValidateTensorInputs(const InputTensorList& tensors) {
+    FCP_CHECK(tensors.size() == 2)
+        << "OneDimGroupingAggregator should operate on 2 input tensors";
+
+    const Tensor* ordinals = tensors[0];
+    if (ordinals->dtype() != DT_INT64) {
+      return FCP_STATUS(INVALID_ARGUMENT)
+             << "OneDimGroupingAggregator::AggregateTensors: dtype mismatch "
+                "for tensor 0. Expected DT_INT64.";
+    }
+    const Tensor* tensor = tensors[1];
+    if (ordinals->shape() != tensor->shape()) {
+      return FCP_STATUS(INVALID_ARGUMENT)
+             << "OneDimGroupingAggregator::AggregateTensors: tensor shape "
+                "mismatch. Shape of both tensors must be the same.";
+    }
+    size_t num_dimensions = tensor->shape().dim_sizes().size();
+    if (num_dimensions > (size_t)1) {
+      return FCP_STATUS(INVALID_ARGUMENT)
+             << "OneDimGroupingAggregator::AggregateTensors: Only 1 "
+                "dimensional tensors supported. Input tensor has "
+             << num_dimensions << " dimensions.";
+    }
+    if (!ordinals->is_dense() || !tensor->is_dense()) {
+      return FCP_STATUS(INVALID_ARGUMENT)
+             << "OneDimGroupingAggregator::AggregateTensors: Only dense "
+                "tensors are supported.";
+    }
+    return FCP_STATUS(OK);
+  }
+
+  void ResizeDataVector(const AggVector<int64_t>& ordinals_vector) {
+    size_t final_size = data_vector_->size();
+    for (auto o : ordinals_vector) {
+      if (o.value >= static_cast<int64_t>(final_size)) {
+        final_size = o.value + 1;
+      }
+    }
+    // Resize once outside the loop to avoid quadratic behavior.
+    data_vector_->resize(final_size, GetDefaultValue());
+  }
+
   std::unique_ptr<MutableVectorData<OutputT>> data_vector_;
   int num_inputs_;
 };

@@ -46,9 +46,21 @@ java_proto_library(
 
 py_proto_library(
     name = "tensor_py_pb2",
+    visibility = ["//visibility:public"],
     deps = [
         ":tensor_proto",
     ],
+)
+
+proto_library(
+    name = "agg_core_proto",
+    srcs = ["agg_core.proto"],
+    deps = [":tensor_proto"],
+)
+
+cc_proto_library(
+    name = "agg_core_cc_proto",
+    deps = [":agg_core_proto"],
 )
 
 cc_library(
@@ -94,7 +106,6 @@ cc_library(
     hdrs = [
         "agg_vector_aggregator.h",
         "aggregator.h",
-        "intrinsic.h",
         "one_dim_grouping_aggregator.h",
         "tensor_aggregator.h",
         "tensor_aggregator_factory.h",
@@ -102,10 +113,27 @@ cc_library(
     ],
     copts = FCP_COPTS,
     deps = [
+        ":agg_core_cc_proto",
+        ":intrinsic",
         ":tensor",
+        ":tensor_cc_proto",
         "//fcp/base",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/strings:cord",
         "@com_google_absl//absl/synchronization",
+    ],
+)
+
+cc_library(
+    name = "intrinsic",
+    hdrs = [
+        "intrinsic.h",
+    ],
+    visibility = [
+        "//visibility:public",
+    ],
+    deps = [
+        ":tensor",
     ],
 )
 
@@ -114,30 +142,43 @@ cc_library(
     srcs = [
         "composite_key_combiner.cc",
         "dp_composite_key_combiner.cc",
+        "dp_group_by_aggregator.cc",
         "dp_grouping_federated_sum.cc",
         "federated_mean.cc",
         "federated_sum.cc",
         "group_by_aggregator.cc",
         "grouping_federated_sum.cc",
+        "one_dim_grouping_aggregator.cc",
     ],
     hdrs = [
         "composite_key_combiner.h",
         "dp_composite_key_combiner.h",
+        "dp_group_by_aggregator.h",
         "group_by_aggregator.h",
         "one_dim_grouping_aggregator.h",
     ],
     copts = FCP_COPTS,
     deps = [
+        ":agg_core_cc_proto",
         ":aggregator",
+        ":dp_fedsql_constants",
         ":fedsql_constants",
+        ":intrinsic",
         ":tensor",
         ":tensor_cc_proto",
         ":vector_string_data",
         "//fcp/base",
         "@com_google_absl//absl/container:fixed_array",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/container:node_hash_map",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/random",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
+        "@com_google_cc_differential_privacy//algorithms:numerical-mechanisms",
+        "@com_google_cc_differential_privacy//algorithms:partition-selection",
+        "@com_google_protobuf//:protobuf",
     ],
     alwayslink = 1,
 )
@@ -180,6 +221,7 @@ cc_test(
     ],
     copts = FCP_COPTS,
     deps = [
+        ":agg_core_cc_proto",
         ":aggregator",
         ":tensor",
         ":tensor_cc_proto",
@@ -199,6 +241,7 @@ cc_test(
     copts = FCP_COPTS,
     deps = [
         ":aggregator",
+        ":intrinsic",
         "//fcp/base",
         "//fcp/testing",
         "@com_google_googletest//:gtest_main",
@@ -217,7 +260,10 @@ cc_library(
     visibility = [
         "//visibility:public",
     ],
-    deps = [":tensor"],
+    deps = [
+        ":tensor",
+        "@com_google_absl//absl/container:fixed_array",
+    ],
 )
 
 cc_library(
@@ -225,13 +271,20 @@ cc_library(
     hdrs = ["fedsql_constants.h"],
 )
 
+cc_library(
+    name = "dp_fedsql_constants",
+    hdrs = ["dp_fedsql_constants.h"],
+)
+
 cc_test(
     name = "federated_mean_test",
     srcs = ["federated_mean_test.cc"],
     copts = FCP_COPTS,
     deps = [
+        ":agg_core_cc_proto",
         ":aggregation_cores",
         ":aggregator",
+        ":intrinsic",
         ":tensor",
         "//fcp/aggregation/testing",
         "//fcp/aggregation/testing:test_data",
@@ -246,6 +299,7 @@ cc_test(
     srcs = ["federated_sum_test.cc"],
     copts = FCP_COPTS,
     deps = [
+        ":agg_core_cc_proto",
         ":aggregation_cores",
         ":aggregator",
         ":tensor",
@@ -327,6 +381,7 @@ cc_test(
         ":mutable_string_data",
         ":tensor",
         "//fcp/testing",
+        "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -335,6 +390,7 @@ cc_test(
     name = "one_dim_grouping_aggregator_test",
     srcs = ["one_dim_grouping_aggregator_test.cc"],
     deps = [
+        ":agg_core_cc_proto",
         ":aggregation_cores",
         ":tensor",
         "//fcp/aggregation/testing",
@@ -351,6 +407,25 @@ cc_test(
     deps = [
         ":aggregation_cores",
         ":aggregator",
+        ":intrinsic",
+        ":tensor",
+        ":tensor_cc_proto",
+        "//fcp/aggregation/testing",
+        "//fcp/aggregation/testing:test_data",
+        "//fcp/base",
+        "//fcp/testing",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "dp_group_by_aggregator_test",
+    srcs = ["dp_group_by_aggregator_test.cc"],
+    deps = [
+        ":aggregation_cores",
+        ":aggregator",
+        ":dp_fedsql_constants",
+        ":intrinsic",
         ":tensor",
         ":tensor_cc_proto",
         "//fcp/aggregation/testing",
@@ -368,6 +443,7 @@ cc_test(
     deps = [
         ":aggregation_cores",
         ":aggregator",
+        ":intrinsic",
         ":tensor",
         "//fcp/aggregation/testing",
         "//fcp/aggregation/testing:test_data",
@@ -384,12 +460,15 @@ cc_test(
     deps = [
         ":aggregation_cores",
         ":aggregator",
+        ":dp_fedsql_constants",
+        ":intrinsic",
         ":tensor",
         ":tensor_cc_proto",
         "//fcp/aggregation/testing",
         "//fcp/aggregation/testing:test_data",
         "//fcp/base",
         "//fcp/testing",
+        "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -403,6 +482,7 @@ cc_binary(
     deps = [
         ":aggregation_cores",
         ":aggregator",
+        ":intrinsic",
         ":tensor",
         "@com_google_benchmark//:benchmark_main",
     ],
@@ -417,6 +497,7 @@ cc_binary(
     deps = [
         ":aggregation_cores",
         ":aggregator",
+        ":intrinsic",
         ":mutable_string_data",
         ":tensor",
         ":tensor_cc_proto",

@@ -64,7 +64,9 @@ service Ledger {
   // access is authorized by the blob's policy and the remaining access budget,
   // the Ledger will decrypt and return the blob's symmetric key (re-encrypted
   // so that only the enclave can read it).
-  // TODO(team): Link to documentation about the blob encryption.
+  //
+  // For more information about blob encryption and access policies, see
+  // https://github.com/google-parfait/confidential-federated-compute/tree/main/ledger_enclave_app#readme.
   // method_id: 3
   rpc AuthorizeAccess(AuthorizeAccessRequest)
       returns (AuthorizeAccessResponse) {
@@ -203,8 +205,6 @@ message AuthorizeAccessResponse {
   // ensures that derived objects have the same expiration time as the original
   // data. This key can be ignored if the application doesn't encrypt its
   // outputs (e.g., because it produces anonymized aggregate results).
-  //
-  // Note: During the migration to CWTs, this may instead be a raw 32-byte key.
   bytes reencryption_public_key = 3;
 }
 

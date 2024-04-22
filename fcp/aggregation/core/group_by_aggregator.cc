@@ -19,11 +19,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/strings/match.h"
+#include "fcp/aggregation/core/agg_core.pb.h"
 #include "fcp/aggregation/core/agg_vector.h"
 #include "fcp/aggregation/core/composite_key_combiner.h"
 #include "fcp/aggregation/core/datatype.h"
@@ -31,6 +32,7 @@
 #include "fcp/aggregation/core/input_tensor_list.h"
 #include "fcp/aggregation/core/intrinsic.h"
 #include "fcp/aggregation/core/mutable_vector_data.h"
+#include "fcp/aggregation/core/one_dim_grouping_aggregator.h"
 #include "fcp/aggregation/core/tensor.h"
 #include "fcp/aggregation/core/tensor.pb.h"
 #include "fcp/aggregation/core/tensor_aggregator.h"
@@ -39,6 +41,7 @@
 #include "fcp/aggregation/core/tensor_shape.h"
 #include "fcp/aggregation/core/tensor_spec.h"
 #include "fcp/base/monitoring.h"
+#include "google/protobuf/repeated_ptr_field.h"
 
 namespace fcp {
 namespace aggregation {
@@ -47,9 +50,12 @@ GroupByAggregator::GroupByAggregator(
     const std::vector<TensorSpec>& input_key_specs,
     const std::vector<TensorSpec>* output_key_specs,
     const std::vector<Intrinsic>* intrinsics,
-    std::vector<std::unique_ptr<TensorAggregator>> aggregators)
-    : num_inputs_(0),
+    std::unique_ptr<CompositeKeyCombiner> key_combiner,
+    std::vector<std::unique_ptr<OneDimBaseGroupingAggregator>> aggregators,
+    int num_inputs)
+    : num_inputs_(num_inputs),
       num_keys_per_input_(input_key_specs.size()),
+      key_combiner_(std::move(key_combiner)),
       intrinsics_(*intrinsics),
       output_key_specs_(*output_key_specs),
       aggregators_(std::move(aggregators)) {
@@ -68,18 +74,31 @@ GroupByAggregator::GroupByAggregator(
   FCP_CHECK(num_keys_per_input_ == output_key_specs->size())
       << "GroupByAggregator: Size of input_key_specs must match size of "
          "output_key_specs.";
+}
+
+std::unique_ptr<CompositeKeyCombiner> GroupByAggregator::CreateKeyCombiner(
+    const std::vector<TensorSpec>& input_key_specs,
+    const std::vector<TensorSpec>* output_key_specs) {
   // If there are no input keys, support a columnar aggregation that aggregates
   // all the values in each column and produces a single output value per
   // column. This would be equivalent to having identical key values for all
   // rows.
-  if (num_keys_per_input_ == 0) {
-    return;
+  if (input_key_specs.empty()) {
+    return nullptr;
   }
+
+  return std::make_unique<CompositeKeyCombiner>(CreateKeyTypes(
+      input_key_specs.size(), input_key_specs, *output_key_specs));
+}
+
+std::vector<DataType> GroupByAggregator::CreateKeyTypes(
+    size_t num_keys_per_input, const std::vector<TensorSpec>& input_key_specs,
+    const std::vector<TensorSpec>& output_key_specs) {
   std::vector<DataType> key_types;
-  key_types.reserve(num_keys_per_input_);
-  for (int i = 0; i < num_keys_per_input_; ++i) {
+  key_types.reserve(num_keys_per_input);
+  for (int i = 0; i < num_keys_per_input; ++i) {
     const TensorSpec& input_spec = input_key_specs[i];
-    const TensorSpec& output_spec = output_key_specs_[i];
+    const TensorSpec& output_spec = output_key_specs[i];
     FCP_CHECK(input_spec.dtype() == output_spec.dtype())
         << "GroupByAggregator: Input and output tensor specifications must "
            "have matching data types";
@@ -94,7 +113,7 @@ GroupByAggregator::GroupByAggregator(
            "size. TensorShape should be {-1}";
     key_types.push_back(input_spec.dtype());
   }
-  key_combiner_.emplace(std::move(key_types));
+  return key_types;
 }
 
 Status GroupByAggregator::MergeWith(TensorAggregator&& other) {
@@ -115,7 +134,8 @@ Status GroupByAggregator::MergeWith(TensorAggregator&& other) {
   InputTensorList tensors(other_output_tensors.size());
   for (int i = 0; i < other_output_tensors.size(); ++i)
     tensors[i] = &other_output_tensors[i];
-  FCP_RETURN_IF_ERROR(AggregateTensorsInternal(std::move(tensors)));
+  FCP_RETURN_IF_ERROR(
+      MergeTensorsInternal(std::move(tensors), other_num_inputs));
   num_inputs_ += other_num_inputs;
   return FCP_STATUS(OK);
 }
@@ -154,11 +174,57 @@ OutputTensorList GroupByAggregator::TakeOutputs() && {
   return outputs;
 }
 
+inline Status GroupByAggregator::ValidateInputTensor(
+    const InputTensorList& tensors, size_t input_index,
+    const TensorSpec& expected_tensor_spec, const TensorShape& key_shape) {
+  // Ensure the tensor at input_index has the expected dtype and shape.
+  const Tensor* tensor = tensors[input_index];
+  if (tensor->dtype() != expected_tensor_spec.dtype()) {
+    return FCP_STATUS(INVALID_ARGUMENT)
+           << "Tensor at position " << input_index
+           << " did not have expected dtype " << expected_tensor_spec.dtype()
+           << " and instead had dtype " << tensor->dtype();
+  }
+  if (tensor->shape() != key_shape) {
+    return FCP_STATUS(INVALID_ARGUMENT)
+           << "GroupByAggregator: Shape of value tensor at index "
+           << input_index
+           << " does not match the shape of the first key tensor.";
+  }
+  if (!tensor->is_dense()) {
+    return FCP_STATUS(INVALID_ARGUMENT)
+           << "GroupByAggregator: Only dense tensors are supported.";
+  }
+  return FCP_STATUS(OK);
+}
+
+StatusOr<std::string> GroupByAggregator::Serialize() && {
+  GroupByAggregatorState state;
+  state.set_num_inputs(num_inputs_);
+  // If keys are being used, store the current list of output keys into state.
+  if (key_combiner_ != nullptr) {
+    OutputTensorList keys = key_combiner_->GetOutputKeys();
+    google::protobuf::RepeatedPtrField<TensorProto>* keys_proto = state.mutable_keys();
+    keys_proto->Reserve(keys.size());
+    for (int i = 0; i < keys.size(); ++i) {
+      keys_proto->Add(keys[i].ToProto());
+    }
+  }
+  // Store the state of the nested aggregators.
+  google::protobuf::RepeatedPtrField<OneDimGroupingAggregatorState>*
+      nested_aggregators_proto = state.mutable_nested_aggregators();
+  nested_aggregators_proto->Reserve(aggregators_.size());
+  for (auto const& nested_aggregator : aggregators_) {
+    nested_aggregators_proto->Add(nested_aggregator->ToProto());
+  }
+  return state.SerializeAsString();
+}
+
 Status GroupByAggregator::AggregateTensorsInternal(InputTensorList tensors) {
   if (tensors.size() != num_tensors_per_input_) {
     return FCP_STATUS(INVALID_ARGUMENT)
-           << "GroupByAggregator should operate on " << num_tensors_per_input_
-           << " input tensors";
+           << "GroupByAggregator::AggregateTensorsInternal should operate on "
+           << num_tensors_per_input_ << " input tensors";
   }
   // Get the shape of the first key tensor in order to ensure that all the value
   // tensors have the same shape. CompositeKeyCombiner::Accumulate will ensure
@@ -170,30 +236,15 @@ Status GroupByAggregator::AggregateTensorsInternal(InputTensorList tensors) {
            << "GroupByAggregator: Only scalar or one-dimensional tensors are "
               "supported.";
   }
-
   // Check all required invariants on the input tensors, so this function can
   // fail before changing the state of this GroupByAggregator if there is an
-  // invalid input tensor.
+  // invalid input tensor. The input tensors should correspond to the Intrinsic
+  // input TensorSpecs since this is an Accumulate operation.
   size_t input_index = num_keys_per_input_;
   for (const Intrinsic& intrinsic : intrinsics_) {
     for (const TensorSpec& tensor_spec : intrinsic.inputs) {
-      const Tensor* tensor = tensors[input_index];
-      // Ensure the types of the value input tensors match the expected types.
-      if (tensor->dtype() != tensor_spec.dtype()) {
-        return FCP_STATUS(INVALID_ARGUMENT)
-               << "Tensor at position " << input_index
-               << " did not have expected dtype " << tensor_spec.dtype()
-               << " and instead had dtype " << tensor->dtype();
-      }
-      if (tensor->shape() != key_shape) {
-        return FCP_STATUS(INVALID_ARGUMENT)
-               << "GroupByAggregator: Shape of value tensor at index "
-               << input_index << " does not match expected shape.";
-      }
-      if (!tensor->is_dense()) {
-        return FCP_STATUS(INVALID_ARGUMENT)
-               << "GroupByAggregator: Only dense tensors are supported.";
-      }
+      FCP_RETURN_IF_ERROR(
+          ValidateInputTensor(tensors, input_index, tensor_spec, key_shape));
       ++input_index;
     }
   }
@@ -207,14 +258,70 @@ Status GroupByAggregator::AggregateTensorsInternal(InputTensorList tensors) {
     for (int j = 0; j < intrinsics_[i].inputs.size(); ++j) {
       intrinsic_inputs[j + 1] = tensors[input_index++];
     }
-    Status accumulate_status =
+    // Accumulate the input tensors into the aggregator.
+    Status aggregation_status =
         aggregators_[i]->Accumulate(std::move(intrinsic_inputs));
-    // If the accumulate operation fails on a sub-intrinsic, the key_combiner_
+    // If the aggregation operation fails on a sub-intrinsic, the key_combiner_
     // and any previous sub-intrinsics have already been modified. Thus, exit
     // the program with a CHECK failure rather than a failed status which might
     // leave the GroupByAggregator in an inconsistent state.
-    FCP_CHECK(accumulate_status.ok())
-        << "GroupByAggregator: " << accumulate_status.message();
+    FCP_CHECK(aggregation_status.ok())
+        << "GroupByAggregator::AggregateTensorsInternal "
+        << aggregation_status.message();
+  }
+  return FCP_STATUS(OK);
+}
+
+Status GroupByAggregator::MergeTensorsInternal(InputTensorList tensors,
+                                               int num_merged_inputs) {
+  if (tensors.size() != num_tensors_per_input_) {
+    return FCP_STATUS(INVALID_ARGUMENT)
+           << "GroupByAggregator::MergeTensorsInternal should operate on "
+           << num_tensors_per_input_ << " input tensors";
+  }
+  // Get the shape of the first key tensor in order to ensure that all the value
+  // tensors have the same shape. CompositeKeyCombiner::Accumulate will ensure
+  // that all keys have the same shape before making any changes to its own
+  // internal state.
+  TensorShape key_shape = tensors[0]->shape();
+  if (key_shape.dim_sizes().size() > 1) {
+    return FCP_STATUS(INVALID_ARGUMENT)
+           << "GroupByAggregator: Only scalar or one-dimensional tensors are "
+              "supported.";
+  }
+  // Check all required invariants on the input tensors, so this function can
+  // fail before changing the state of this GroupByAggregator if there is an
+  // invalid input tensor. The input tensors should correspond to the Intrinsic
+  // output TensorSpecs since this is an Merge operation.
+  size_t input_index = num_keys_per_input_;
+  for (const Intrinsic& intrinsic : intrinsics_) {
+    for (const TensorSpec& tensor_spec : intrinsic.outputs) {
+      FCP_RETURN_IF_ERROR(
+          ValidateInputTensor(tensors, input_index, tensor_spec, key_shape));
+      ++input_index;
+    }
+  }
+
+  FCP_ASSIGN_OR_RETURN(Tensor ordinals,
+                       CreateOrdinalsByGroupingKeysForMerge(tensors));
+
+  input_index = num_keys_per_input_;
+  for (int i = 0; i < intrinsics_.size(); ++i) {
+    InputTensorList intrinsic_inputs(intrinsics_[i].inputs.size() + 1);
+    intrinsic_inputs[0] = &ordinals;
+    for (int j = 0; j < intrinsics_[i].inputs.size(); ++j) {
+      intrinsic_inputs[j + 1] = tensors[input_index++];
+    }
+    // Merge the input tensors into the aggregator.
+    Status aggregation_status = aggregators_[i]->MergeTensors(
+        std::move(intrinsic_inputs), num_merged_inputs);
+    // If the aggregation operation fails on a sub-intrinsic, the key_combiner_
+    // and any previous sub-intrinsics have already been modified. Thus, exit
+    // the program with a CHECK failure rather than a failed status which might
+    // leave the GroupByAggregator in an inconsistent state.
+    FCP_CHECK(aggregation_status.ok())
+        << "GroupByAggregator::MergeTensorsInternal "
+        << aggregation_status.message();
   }
   return FCP_STATUS(OK);
 }
@@ -222,7 +329,7 @@ Status GroupByAggregator::AggregateTensorsInternal(InputTensorList tensors) {
 OutputTensorList GroupByAggregator::TakeOutputsInternal() {
   output_consumed_ = true;
   OutputTensorList outputs;
-  if (key_combiner_.has_value()) {
+  if (key_combiner_ != nullptr) {
     outputs = key_combiner_->GetOutputKeys();
   }
   outputs.reserve(outputs.size() + intrinsics_.size());
@@ -240,7 +347,7 @@ OutputTensorList GroupByAggregator::TakeOutputsInternal() {
 
 StatusOr<Tensor> GroupByAggregator::CreateOrdinalsByGroupingKeys(
     const InputTensorList& inputs) {
-  if (key_combiner_.has_value()) {
+  if (key_combiner_ != nullptr) {
     InputTensorList keys(num_keys_per_input_);
     for (int i = 0; i < num_keys_per_input_; ++i) {
       keys[i] = inputs[i];
@@ -255,15 +362,23 @@ StatusOr<Tensor> GroupByAggregator::CreateOrdinalsByGroupingKeys(
   return Tensor::Create(internal::TypeTraits<int64_t>::kDataType,
                         inputs[0]->shape(), std::move(ordinals));
 }
+StatusOr<Tensor> GroupByAggregator::CreateOrdinalsByGroupingKeysForMerge(
+    const InputTensorList& inputs) {
+  // In this base class, ordinals are made the same way for MergeTensorsInternal
+  // as for AggregateTensorsInternal.
+  return CreateOrdinalsByGroupingKeys(inputs);
+}
 
 Status GroupByAggregator::IsCompatible(const GroupByAggregator& other) const {
-  if (other.key_combiner_.has_value() != key_combiner_.has_value()) {
+  bool other_has_no_combiner = (other.key_combiner_ == nullptr);
+  bool this_has_no_combiner = (key_combiner_ == nullptr);
+  if (other_has_no_combiner != this_has_no_combiner) {
     return FCP_STATUS(INVALID_ARGUMENT)
            << "GroupByAggregator::MergeWith: "
               "Expected other GroupByAggregator to have the same key input and "
               "output specs";
   }
-  if (!key_combiner_.has_value()) {
+  if (this_has_no_combiner) {
     return FCP_STATUS(OK);
   }
   // The constructor validates that input key types match output key types, so
@@ -298,12 +413,12 @@ Status GroupByAggregator::IsCompatible(const GroupByAggregator& other) const {
   return FCP_STATUS(OK);
 }
 
-StatusOr<std::unique_ptr<TensorAggregator>> GroupByFactory::Create(
-    const Intrinsic& intrinsic) const {
-  // Check that the configuration is valid for fedsql_group_by.
-  if (intrinsic.uri != kGroupByUri) {
+// Check that the configuration is valid for SQL grouping aggregators.
+Status GroupByFactory::CheckIntrinsic(const Intrinsic& intrinsic,
+                                      const char* uri) {
+  if (intrinsic.uri != uri) {
     return FCP_STATUS(INVALID_ARGUMENT)
-           << "GroupByFactory: Expected intrinsic URI " << kGroupByUri
+           << "GroupByFactory: Expected intrinsic URI " << uri
            << " but got uri " << intrinsic.uri;
   }
   if (intrinsic.inputs.size() != intrinsic.outputs.size()) {
@@ -314,11 +429,6 @@ StatusOr<std::unique_ptr<TensorAggregator>> GroupByFactory::Create(
            << intrinsic.inputs.size() << " inputs vs "
            << intrinsic.outputs.size() << " outputs.";
   }
-  if (!intrinsic.parameters.empty()) {
-    return FCP_STATUS(INVALID_ARGUMENT)
-           << "GroupByFactory: No input parameters expected.";
-  }
-
   for (int i = 0; i < intrinsic.inputs.size(); ++i) {
     const TensorSpec& input_spec = intrinsic.inputs[i];
     const TensorSpec& output_spec = intrinsic.outputs[i];
@@ -335,38 +445,121 @@ StatusOr<std::unique_ptr<TensorAggregator>> GroupByFactory::Create(
                 "unknown size. TensorShape should be {-1}";
     }
   }
+  return FCP_STATUS(OK);
+}
 
-  std::vector<std::unique_ptr<TensorAggregator>> nested_aggregators;
+// Create a vector of OneDimBaseGroupingAggregators based upon nested intrinsics
+StatusOr<std::vector<std::unique_ptr<OneDimBaseGroupingAggregator>>>
+GroupByFactory::CreateAggregators(
+    const Intrinsic& intrinsic,
+    const GroupByAggregatorState* aggregator_state) {
+  std::vector<std::unique_ptr<OneDimBaseGroupingAggregator>> nested_aggregators;
   int num_value_inputs = 0;
-  for (const Intrinsic& nested : intrinsic.nested_intrinsics) {
-    // Disable lint checks recommending use of absl::StrContains() here, because
-    // we don't want to take a dependency on absl libraries in the aggregation
-    // core implementations.
-    if (nested.uri.find(kFedSqlPrefix)  // NOLINT
-        == std::string::npos) {         // NOLINT
-      return FCP_STATUS(INVALID_ARGUMENT)
-             << "GroupByFactory: Nested intrinsic URIs must start with "
-                "'GoogleSQL:'.";
-    }
+  for (int i = 0; i < intrinsic.nested_intrinsics.size(); ++i) {
+    const Intrinsic& nested = intrinsic.nested_intrinsics[i];
+    const OneDimGroupingAggregatorState* nested_state =
+        aggregator_state == nullptr ? nullptr
+                                    : &aggregator_state->nested_aggregators(i);
     // Resolve the intrinsic_uri to the registered TensorAggregatorFactory.
     FCP_ASSIGN_OR_RETURN(const TensorAggregatorFactory* factory,
                          GetAggregatorFactory(nested.uri));
 
-    // Use the factory to create the TensorAggregator instance.
-    FCP_ASSIGN_OR_RETURN(auto nested_aggregator, factory->Create(nested));
-    nested_aggregators.push_back(std::move(nested_aggregator));
+    // Use the factory to create or deserialize the TensorAggregator instance.
+    std::unique_ptr<TensorAggregator> nested_aggregator;
+    if (nested_state == nullptr) {
+      FCP_ASSIGN_OR_RETURN(nested_aggregator, factory->Create(nested));
+    } else {
+      auto one_dim_base_factory =
+          dynamic_cast<const OneDimBaseGroupingAggregatorFactory*>(factory);
+      FCP_CHECK(one_dim_base_factory != nullptr);
+      FCP_ASSIGN_OR_RETURN(nested_aggregator, one_dim_base_factory->FromProto(
+                                                  nested, *nested_state));
+    }
+    nested_aggregators.push_back(std::unique_ptr<OneDimBaseGroupingAggregator>(
+        dynamic_cast<OneDimBaseGroupingAggregator*>(
+            nested_aggregator.release())));
     num_value_inputs += nested.inputs.size();
   }
   if (num_value_inputs + intrinsic.inputs.size() == 0) {
     return FCP_STATUS(INVALID_ARGUMENT) << "GroupByFactory: Must operate on a "
                                            "nonzero number of input tensors.";
   }
+  return nested_aggregators;
+}
+
+Status GroupByFactory::PopulateKeyCombinerFromState(
+    CompositeKeyCombiner& key_combiner,
+    const GroupByAggregatorState& aggregator_state) {
+  if (aggregator_state.num_inputs() == 0) {
+    return FCP_STATUS(OK);
+  }
+  std::vector<Tensor> key_tensors(aggregator_state.keys().size());
+  InputTensorList keys(aggregator_state.keys().size());
+  for (int i = 0; i < aggregator_state.keys().size(); ++i) {
+    key_tensors[i] = Tensor::FromProto(aggregator_state.keys(i)).value();
+    keys[i] = &(key_tensors[i]);
+  }
+  return key_combiner.CompositeKeyCombiner::Accumulate(keys).status();
+}
+
+StatusOr<std::unique_ptr<TensorAggregator>> GroupByFactory::Create(
+    const Intrinsic& intrinsic) const {
+  return CreateInternal(intrinsic, nullptr);
+}
+
+StatusOr<std::unique_ptr<TensorAggregator>> GroupByFactory::Deserialize(
+    const Intrinsic& intrinsic, std::string serialized_state) const {
+  GroupByAggregatorState aggregator_state;
+  if (!aggregator_state.ParseFromString(serialized_state)) {
+    return FCP_STATUS(INVALID_ARGUMENT)
+           << "GroupByFactory: Failed to parse serialized aggregator.";
+  }
+  return CreateInternal(intrinsic, &aggregator_state);
+}
+
+StatusOr<std::unique_ptr<TensorAggregator>> GroupByFactory::CreateInternal(
+    const Intrinsic& intrinsic,
+    const GroupByAggregatorState* aggregator_state) const {
+  // Check that the configuration is valid for fedsql_group_by.
+  FCP_RETURN_IF_ERROR(CheckIntrinsic(intrinsic, kGroupByUri));
+
+  // The GroupByAggregator expects no parameters
+  if (!intrinsic.parameters.empty()) {
+    return FCP_STATUS(INVALID_ARGUMENT)
+           << "GroupByFactory: No input parameters expected.";
+  }
+
+  // The nested intrinsics' URIs should begin with kFedSqlPrefix
+  for (const Intrinsic& nested : intrinsic.nested_intrinsics) {
+    if (!absl::StartsWith(nested.uri, kFedSqlPrefix)) {
+      return FCP_STATUS(INVALID_ARGUMENT)
+             << "GroupByFactory: Nested intrinsic URIs must start with '"
+             << kFedSqlPrefix << "'.";
+    }
+  }
+
+  // Create nested aggregators.
+  std::vector<std::unique_ptr<OneDimBaseGroupingAggregator>> nested_aggregators;
+  FCP_ASSIGN_OR_RETURN(nested_aggregators,
+                       CreateAggregators(intrinsic, aggregator_state));
+
+  // Create the key combiner, and only populate the key combiner with state if
+  // there are keys.
+  auto key_combiner = GroupByAggregator::CreateKeyCombiner(intrinsic.inputs,
+                                                           &intrinsic.outputs);
+  if (aggregator_state != nullptr && key_combiner != nullptr) {
+    FCP_RETURN_IF_ERROR(
+        PopulateKeyCombinerFromState(*key_combiner, *aggregator_state));
+  }
+
+  int num_inputs = aggregator_state ? aggregator_state->num_inputs() : 0;
+
   // Use new rather than make_unique here because the factory function that uses
   // a non-public constructor can't use std::make_unique, and we don't want to
   // add a dependency on absl::WrapUnique.
   return std::unique_ptr<GroupByAggregator>(new GroupByAggregator(
       intrinsic.inputs, &intrinsic.outputs, &intrinsic.nested_intrinsics,
-      std::move(nested_aggregators)));
+      std::move(key_combiner), std::move(nested_aggregators), num_inputs));
 }
 
 // TODO(team): Revise the registration mechanism below.

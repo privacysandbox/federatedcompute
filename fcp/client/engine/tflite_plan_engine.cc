@@ -80,8 +80,9 @@ TfLiteInterpreterOptions CreateOptions(const Flags& flags) {
           flags.ensure_dynamic_tensors_are_released(),
       .large_tensor_threshold_for_dynamic_allocation =
           flags.large_tensor_threshold_for_dynamic_allocation(),
-      .disable_delegate_clustering =
-          flags.disable_tflite_delegate_clustering()};
+      .disable_delegate_clustering = flags.disable_tflite_delegate_clustering(),
+      .use_builtin_op_resolver_with_default_delegates =
+          flags.tflite_use_builtin_op_resolver_with_default_delegates()};
 }
 }  // namespace
 
@@ -137,23 +138,9 @@ PlanResult TfLitePlanEngine::RunPlan(
       }
     }
   }
-  absl::StatusOr<OutputTensors> output;
-  if (flags_.use_thread_safe_tflite_wrapper()) {
-    output = RunTfLiteModelThreadSafe(
-        model, should_abort_, *timing_config_, log_manager_, std::move(inputs),
-        output_names, CreateOptions(flags_), flags_.num_threads_for_tflite());
-  } else {
-    absl::StatusOr<std::unique_ptr<TfLiteWrapper>> tflite_wrapper =
-        TfLiteWrapper::Create(model, should_abort_, *timing_config_,
-                              log_manager_, std::move(inputs), output_names,
-                              CreateOptions(flags_),
-                              flags_.num_threads_for_tflite());
-    if (!tflite_wrapper.ok()) {
-      return PlanResult(PlanOutcome::kTensorflowError, tflite_wrapper.status());
-    }
-    // Start running the plan.
-    output = (*tflite_wrapper)->Run();
-  }
+  absl::StatusOr<OutputTensors> output = RunTfLiteModelThreadSafe(
+      model, should_abort_, *timing_config_, log_manager_, std::move(inputs),
+      output_names, CreateOptions(flags_), flags_.num_threads_for_tflite());
   PlanResult plan_result = CreatePlanResultFromOutput(
       std::move(output), &total_example_count, &total_example_size_bytes,
       example_iterator_status.GetStatus());

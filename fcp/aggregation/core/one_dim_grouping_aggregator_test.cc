@@ -17,11 +17,14 @@
 
 #include <climits>
 #include <cstdint>
+#include <memory>
 #include <utility>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "fcp/aggregation/core/agg_core.pb.h"
 #include "fcp/aggregation/core/agg_vector.h"
+#include "fcp/aggregation/core/mutable_vector_data.h"
 #include "fcp/aggregation/core/tensor.h"
 #include "fcp/aggregation/core/tensor_shape.h"
 #include "fcp/aggregation/testing/test_data.h"
@@ -34,8 +37,12 @@ namespace aggregation {
 namespace {
 
 using testing::Eq;
+using testing::HasSubstr;
 using testing::IsFalse;
 using testing::IsTrue;
+using testing::TestWithParam;
+
+using OneDimGroupingAggregatorTest = TestWithParam<bool>;
 
 // A simple Sum Aggregator
 template <typename InputT, typename OutputT = InputT>
@@ -44,6 +51,14 @@ class SumGroupingAggregator final
  public:
   using OneDimGroupingAggregator<InputT, OutputT>::OneDimGroupingAggregator;
   using OneDimGroupingAggregator<InputT, OutputT>::data;
+
+  static SumGroupingAggregator<InputT, OutputT> FromProto(
+      const OneDimGroupingAggregatorState& aggregator_state) {
+    return SumGroupingAggregator<InputT, OutputT>(
+        MutableVectorData<OutputT>::CreateFromEncodedContent(
+            aggregator_state.vector_data()),
+        aggregator_state.num_inputs());
+  }
 
  private:
   void AggregateVectorByOrdinals(
@@ -70,9 +85,15 @@ class SumGroupingAggregator final
     }
   }
 
-  void AggregateVector(const AggVector<OutputT>& value_vector) override {
-    for (auto it : value_vector) {
-      AggregateValue(it.index, it.value);
+  void MergeVectorByOrdinals(const AggVector<int64_t>& ordinals_vector,
+                             const AggVector<OutputT>& value_vector) override {
+    auto value_it = value_vector.begin();
+    for (auto o : ordinals_vector) {
+      int64_t output_index = o.value;
+      FCP_CHECK(value_it.index() == o.index)
+          << "Indices in AggVector of ordinals and AggVector of values "
+             "are mismatched.";
+      AggregateValue(output_index, value_it++.value());
     }
   }
 
@@ -86,6 +107,14 @@ class MinGroupingAggregator final : public OneDimGroupingAggregator<int32_t> {
  public:
   using OneDimGroupingAggregator<int32_t>::OneDimGroupingAggregator;
   using OneDimGroupingAggregator<int32_t>::data;
+
+  static MinGroupingAggregator FromProto(
+      const OneDimGroupingAggregatorState& aggregator_state) {
+    return MinGroupingAggregator(
+        MutableVectorData<int32_t>::CreateFromEncodedContent(
+            aggregator_state.vector_data()),
+        aggregator_state.num_inputs());
+  }
 
  private:
   void AggregateVectorByOrdinals(
@@ -112,10 +141,9 @@ class MinGroupingAggregator final : public OneDimGroupingAggregator<int32_t> {
     }
   }
 
-  void AggregateVector(const AggVector<int32_t>& value_vector) override {
-    for (auto it : value_vector) {
-      AggregateValue(it.index, it.value);
-    }
+  void MergeVectorByOrdinals(const AggVector<int64_t>& ordinals_vector,
+                             const AggVector<int32_t>& value_vector) override {
+    AggregateVectorByOrdinals(ordinals_vector, value_vector);
   }
 
   inline void AggregateValue(int64_t i, int32_t value) {
@@ -126,15 +154,21 @@ class MinGroupingAggregator final : public OneDimGroupingAggregator<int32_t> {
   int32_t GetDefaultValue() override { return INT_MAX; }
 };
 
-TEST(OneDimGroupingAggregatorTest, EmptyReport) {
+TEST_P(OneDimGroupingAggregatorTest, EmptyReport) {
   SumGroupingAggregator<int32_t> aggregator;
+
+  if (GetParam()) {
+    auto state = std::move(aggregator).ToProto();
+    aggregator = SumGroupingAggregator<int32_t>::FromProto(state);
+  }
+
   auto result = std::move(aggregator).Report();
   EXPECT_THAT(result, IsOk());
   EXPECT_THAT(result->size(), Eq(1));
   EXPECT_THAT(result.value()[0], IsTensor<int32_t>({0}, {}));
 }
 
-TEST(OneDimGroupingAggregatorTest, ScalarAggregation_Succeeds) {
+TEST_P(OneDimGroupingAggregatorTest, ScalarAggregation_Succeeds) {
   SumGroupingAggregator<int32_t> aggregator;
   Tensor ordinal =
       Tensor::Create(DT_INT64, {}, CreateTestData<int64_t>({0})).value();
@@ -143,6 +177,12 @@ TEST(OneDimGroupingAggregatorTest, ScalarAggregation_Succeeds) {
   Tensor t3 = Tensor::Create(DT_INT32, {}, CreateTestData({3})).value();
   EXPECT_THAT(aggregator.Accumulate({&ordinal, &t1}), IsOk());
   EXPECT_THAT(aggregator.Accumulate({&ordinal, &t2}), IsOk());
+
+  if (GetParam()) {
+    auto state = std::move(aggregator).ToProto();
+    aggregator = SumGroupingAggregator<int32_t>::FromProto(state);
+  }
+
   EXPECT_THAT(aggregator.Accumulate({&ordinal, &t3}), IsOk());
   EXPECT_THAT(aggregator.CanReport(), IsTrue());
 
@@ -153,7 +193,7 @@ TEST(OneDimGroupingAggregatorTest, ScalarAggregation_Succeeds) {
   EXPECT_THAT(result.value()[0], IsTensor({1}, {6}));
 }
 
-TEST(OneDimGroupingAggregatorTest, DenseAggregation_Succeeds) {
+TEST_P(OneDimGroupingAggregatorTest, DenseAggregation_Succeeds) {
   const TensorShape shape = {4};
   SumGroupingAggregator<int32_t> aggregator;
   Tensor ordinals =
@@ -167,6 +207,12 @@ TEST(OneDimGroupingAggregatorTest, DenseAggregation_Succeeds) {
       Tensor::Create(DT_INT32, shape, CreateTestData({3, 11, 7, 20})).value();
   EXPECT_THAT(aggregator.Accumulate({&ordinals, &t1}), IsOk());
   EXPECT_THAT(aggregator.Accumulate({&ordinals, &t2}), IsOk());
+
+  if (GetParam()) {
+    auto state = std::move(aggregator).ToProto();
+    aggregator = SumGroupingAggregator<int32_t>::FromProto(state);
+  }
+
   EXPECT_THAT(aggregator.Accumulate({&ordinals, &t3}), IsOk());
   EXPECT_THAT(aggregator.CanReport(), IsTrue());
   EXPECT_THAT(aggregator.GetNumInputs(), Eq(3));
@@ -180,7 +226,7 @@ TEST(OneDimGroupingAggregatorTest, DenseAggregation_Succeeds) {
   EXPECT_TRUE(result.value()[0].is_dense());
 }
 
-TEST(OneDimGroupingAggregatorTest, DifferentOrdinalsPerAccumulate_Succeeds) {
+TEST_P(OneDimGroupingAggregatorTest, DifferentOrdinalsPerAccumulate_Succeeds) {
   const TensorShape shape = {4};
   SumGroupingAggregator<int32_t> aggregator;
   Tensor t1_ordinals =
@@ -196,6 +242,12 @@ TEST(OneDimGroupingAggregatorTest, DifferentOrdinalsPerAccumulate_Succeeds) {
   Tensor t2 =
       Tensor::Create(DT_INT32, shape, CreateTestData({10, 5, 1, 2})).value();
   EXPECT_THAT(aggregator.Accumulate({&t2_ordinals, &t2}), IsOk());
+
+  if (GetParam()) {
+    auto state = std::move(aggregator).ToProto();
+    aggregator = SumGroupingAggregator<int32_t>::FromProto(state);
+  }
+
   // Totals: [32, 11, 15, 4, 2]
   Tensor t3_ordinals =
       Tensor::Create(DT_INT64, shape, CreateTestData<int64_t>({2, 2, 5, 1}))
@@ -216,7 +268,7 @@ TEST(OneDimGroupingAggregatorTest, DifferentOrdinalsPerAccumulate_Succeeds) {
   EXPECT_TRUE(result.value()[0].is_dense());
 }
 
-TEST(OneDimGroupingAggregatorTest, DifferentShapesPerAccumulate_Succeeds) {
+TEST_P(OneDimGroupingAggregatorTest, DifferentShapesPerAccumulate_Succeeds) {
   SumGroupingAggregator<int32_t> aggregator;
   Tensor t1_ordinals =
       Tensor::Create(DT_INT64, {2}, CreateTestData<int64_t>({2, 0})).value();
@@ -230,6 +282,12 @@ TEST(OneDimGroupingAggregatorTest, DifferentShapesPerAccumulate_Succeeds) {
       Tensor::Create(DT_INT32, {6}, CreateTestData({10, 5, 13, 2, 4, 5}))
           .value();
   EXPECT_THAT(aggregator.Accumulate({&t2_ordinals, &t2}), IsOk());
+
+  if (GetParam()) {
+    auto state = std::move(aggregator).ToProto();
+    aggregator = SumGroupingAggregator<int32_t>::FromProto(state);
+  }
+
   // Totals: [13, 23, 17, 4, 2]
   Tensor t3_ordinals =
       Tensor::Create(DT_INT64, {5}, CreateTestData<int64_t>({2, 2, 1, 0, 4}))
@@ -250,8 +308,8 @@ TEST(OneDimGroupingAggregatorTest, DifferentShapesPerAccumulate_Succeeds) {
   EXPECT_TRUE(result.value()[0].is_dense());
 }
 
-TEST(OneDimGroupingAggregatorTest,
-     DifferentShapesPerAccumulate_NonzeroDefaultValue_Succeeds) {
+TEST_P(OneDimGroupingAggregatorTest,
+       DifferentShapesPerAccumulate_NonzeroDefaultValue_Succeeds) {
   // Use a MinGroupingAggregator which has a non-zero default value so we can
   // test that when the output grows, elements are set to the default value.
   MinGroupingAggregator aggregator;
@@ -267,6 +325,12 @@ TEST(OneDimGroupingAggregatorTest,
       Tensor::Create(DT_INT32, {6}, CreateTestData({10, 5, 13, 2, 4, -50}))
           .value();
   EXPECT_THAT(aggregator.Accumulate({&t2_ordinals, &t2}), IsOk());
+
+  if (GetParam()) {
+    auto state = std::move(aggregator).ToProto();
+    aggregator = MinGroupingAggregator::FromProto(state);
+  }
+
   // Totals: [-50, INT_MAX, 17, INT_MAX, 2]
   Tensor t3_ordinals =
       Tensor::Create(DT_INT64, {5}, CreateTestData<int64_t>({2, 2, 1, 0, 4}))
@@ -287,19 +351,35 @@ TEST(OneDimGroupingAggregatorTest,
   EXPECT_TRUE(result.value()[0].is_dense());
 }
 
-TEST(OneDimGroupingAggregatorTest, Merge_Succeeds) {
+TEST_P(OneDimGroupingAggregatorTest, Merge_Succeeds) {
   SumGroupingAggregator<int32_t> aggregator1;
   SumGroupingAggregator<int32_t> aggregator2;
   Tensor ordinal =
-      Tensor::Create(DT_INT64, {}, CreateTestData<int64_t>({0})).value();
-  Tensor t1 = Tensor::Create(DT_INT32, {}, CreateTestData({1})).value();
-  Tensor t2 = Tensor::Create(DT_INT32, {}, CreateTestData({2})).value();
-  Tensor t3 = Tensor::Create(DT_INT32, {}, CreateTestData({3})).value();
+      Tensor::Create(DT_INT64, {1}, CreateTestData<int64_t>({0})).value();
+  Tensor t1 = Tensor::Create(DT_INT32, {1}, CreateTestData({1})).value();
+  Tensor t2 = Tensor::Create(DT_INT32, {1}, CreateTestData({2})).value();
+  Tensor t3 = Tensor::Create(DT_INT32, {1}, CreateTestData({3})).value();
   EXPECT_THAT(aggregator1.Accumulate({&ordinal, &t1}), IsOk());
   EXPECT_THAT(aggregator2.Accumulate({&ordinal, &t2}), IsOk());
   EXPECT_THAT(aggregator2.Accumulate({&ordinal, &t3}), IsOk());
 
-  EXPECT_THAT(aggregator1.MergeWith(std::move(aggregator2)), IsOk());
+  if (GetParam()) {
+    auto state1 = std::move(aggregator1).ToProto();
+    aggregator1 = SumGroupingAggregator<int32_t>::FromProto(state1);
+    auto state2 = std::move(aggregator2).ToProto();
+    aggregator2 = SumGroupingAggregator<int32_t>::FromProto(state2);
+  }
+
+  int aggregator2_num_inputs = aggregator2.GetNumInputs();
+  EXPECT_THAT(aggregator2_num_inputs, Eq(2));
+  auto aggregator2_result = std::move(aggregator2).Report();
+  EXPECT_THAT(aggregator2_result, IsOk());
+  EXPECT_THAT(aggregator2_result->size(), Eq(1));
+  Tensor aggregator2_result_tensor = std::move(aggregator2_result.value()[0]);
+  EXPECT_THAT(aggregator2_result_tensor, IsTensor<int32_t>({1}, {5}));
+  EXPECT_THAT(aggregator1.MergeTensors({&ordinal, &aggregator2_result_tensor},
+                                       aggregator2_num_inputs),
+              IsOk());
   EXPECT_THAT(aggregator1.CanReport(), IsTrue());
   EXPECT_THAT(aggregator1.GetNumInputs(), Eq(3));
 
@@ -309,12 +389,26 @@ TEST(OneDimGroupingAggregatorTest, Merge_Succeeds) {
   EXPECT_THAT(result.value()[0], IsTensor({1}, {6}));
 }
 
-TEST(OneDimGroupingAggregatorTest, Merge_BothEmpty_Succeeds) {
+TEST_P(OneDimGroupingAggregatorTest, Merge_BothEmpty_Succeeds) {
   SumGroupingAggregator<int32_t> aggregator1;
   SumGroupingAggregator<int32_t> aggregator2;
 
+  if (GetParam()) {
+    auto state1 = std::move(aggregator1).ToProto();
+    aggregator1 = SumGroupingAggregator<int32_t>::FromProto(state1);
+    auto state2 = std::move(aggregator2).ToProto();
+    aggregator2 = SumGroupingAggregator<int32_t>::FromProto(state2);
+  }
+
   // Merge the two empty aggregators together.
-  EXPECT_THAT(aggregator1.MergeWith(std::move(aggregator2)), IsOk());
+  auto empty_ordinals =
+      Tensor::Create(DT_INT64, {0}, CreateTestData<int64_t>({})).value();
+  int aggregator2_num_inputs = aggregator2.GetNumInputs();
+  auto aggregator2_result =
+      std::move(std::move(aggregator2).Report().value()[0]);
+  EXPECT_THAT(aggregator1.MergeTensors({&empty_ordinals, &aggregator2_result},
+                                       aggregator2_num_inputs),
+              IsOk());
   EXPECT_THAT(aggregator1.CanReport(), IsTrue());
   EXPECT_THAT(aggregator1.GetNumInputs(), Eq(0));
 
@@ -324,7 +418,7 @@ TEST(OneDimGroupingAggregatorTest, Merge_BothEmpty_Succeeds) {
   EXPECT_THAT(result.value()[0], IsTensor<int32_t>({0}, {}));
 }
 
-TEST(OneDimGroupingAggregatorTest, Merge_ThisOutputEmpty_Succeeds) {
+TEST_P(OneDimGroupingAggregatorTest, Merge_ThisOutputEmpty_Succeeds) {
   SumGroupingAggregator<int32_t> aggregator1;
   SumGroupingAggregator<int32_t> aggregator2;
 
@@ -343,8 +437,24 @@ TEST(OneDimGroupingAggregatorTest, Merge_ThisOutputEmpty_Succeeds) {
   EXPECT_THAT(aggregator2.Accumulate({&t2_ordinals, &t2}), IsOk());
   // aggregator2 totals: [32, 11, 15, 4, 2]
 
+  if (GetParam()) {
+    auto state1 = std::move(aggregator1).ToProto();
+    aggregator1 = SumGroupingAggregator<int32_t>::FromProto(state1);
+    auto state2 = std::move(aggregator2).ToProto();
+    aggregator2 = SumGroupingAggregator<int32_t>::FromProto(state2);
+  }
+
   // Merge aggregator2 into aggregator1 which has not received any inputs.
-  EXPECT_THAT(aggregator1.MergeWith(std::move(aggregator2)), IsOk());
+  int aggregator2_num_inputs = aggregator2.GetNumInputs();
+  auto aggregator2_result =
+      std::move(std::move(aggregator2).Report().value()[0]);
+  auto ordinals_for_merge =
+      Tensor::Create(DT_INT64, {5}, CreateTestData<int64_t>({2, 6, 1, 4, 3}))
+          .value();
+  EXPECT_THAT(
+      aggregator1.MergeTensors({&ordinals_for_merge, &aggregator2_result},
+                               aggregator2_num_inputs),
+      IsOk());
   EXPECT_THAT(aggregator1.CanReport(), IsTrue());
   EXPECT_THAT(aggregator1.GetNumInputs(), Eq(2));
 
@@ -352,12 +462,12 @@ TEST(OneDimGroupingAggregatorTest, Merge_ThisOutputEmpty_Succeeds) {
   EXPECT_THAT(result, IsOk());
   EXPECT_THAT(result.value().size(), Eq(1));
   // Verify the resulting tensor.
-  EXPECT_THAT(result.value()[0], IsTensor({5}, {32, 11, 15, 4, 2}));
+  EXPECT_THAT(result.value()[0], IsTensor({7}, {0, 15, 32, 2, 4, 0, 11}));
   // Also ensure that the resulting tensor is dense.
   EXPECT_TRUE(result.value()[0].is_dense());
 }
 
-TEST(OneDimGroupingAggregatorTest, Merge_OtherOutputEmpty_Succeeds) {
+TEST_P(OneDimGroupingAggregatorTest, Merge_OtherOutputEmpty_Succeeds) {
   SumGroupingAggregator<int32_t> aggregator1;
   SumGroupingAggregator<int32_t> aggregator2;
 
@@ -376,8 +486,22 @@ TEST(OneDimGroupingAggregatorTest, Merge_OtherOutputEmpty_Succeeds) {
   EXPECT_THAT(aggregator1.Accumulate({&t2_ordinals, &t2}), IsOk());
   // aggregator1 totals: [32, 11, 15, 4, 2]
 
+  if (GetParam()) {
+    auto state1 = std::move(aggregator1).ToProto();
+    aggregator1 = SumGroupingAggregator<int32_t>::FromProto(state1);
+    auto state2 = std::move(aggregator2).ToProto();
+    aggregator2 = SumGroupingAggregator<int32_t>::FromProto(state2);
+  }
+
   // Merge with aggregator2 which has not received any inputs.
-  EXPECT_THAT(aggregator1.MergeWith(std::move(aggregator2)), IsOk());
+  auto empty_ordinals =
+      Tensor::Create(DT_INT64, {0}, CreateTestData<int64_t>({})).value();
+  int aggregator2_num_inputs = aggregator2.GetNumInputs();
+  auto aggregator2_result =
+      std::move(std::move(aggregator2).Report().value()[0]);
+  EXPECT_THAT(aggregator1.MergeTensors({&empty_ordinals, &aggregator2_result},
+                                       aggregator2_num_inputs),
+              IsOk());
   EXPECT_THAT(aggregator1.CanReport(), IsTrue());
   EXPECT_THAT(aggregator1.GetNumInputs(), Eq(2));
 
@@ -390,7 +514,8 @@ TEST(OneDimGroupingAggregatorTest, Merge_OtherOutputEmpty_Succeeds) {
   EXPECT_TRUE(result.value()[0].is_dense());
 }
 
-TEST(OneDimGroupingAggregatorTest, Merge_OtherOutputHasFewerElements_Succeeds) {
+TEST_P(OneDimGroupingAggregatorTest,
+       Merge_OtherOutputHasFewerElements_Succeeds) {
   SumGroupingAggregator<int32_t> aggregator1;
   SumGroupingAggregator<int32_t> aggregator2;
 
@@ -415,7 +540,22 @@ TEST(OneDimGroupingAggregatorTest, Merge_OtherOutputHasFewerElements_Succeeds) {
   EXPECT_THAT(aggregator2.Accumulate({&t3_ordinals, &t3}), IsOk());
   // aggregator2 totals: [0, 0, 14]
 
-  EXPECT_THAT(aggregator1.MergeWith(std::move(aggregator2)), IsOk());
+  if (GetParam()) {
+    auto state1 = std::move(aggregator1).ToProto();
+    aggregator1 = SumGroupingAggregator<int32_t>::FromProto(state1);
+    auto state2 = std::move(aggregator2).ToProto();
+    aggregator2 = SumGroupingAggregator<int32_t>::FromProto(state2);
+  }
+
+  int aggregator2_num_inputs = aggregator2.GetNumInputs();
+  auto aggregator2_result =
+      std::move(std::move(aggregator2).Report().value()[0]);
+  auto ordinals_for_merge =
+      Tensor::Create(DT_INT64, {3}, CreateTestData<int64_t>({2, 0, 1})).value();
+  EXPECT_THAT(
+      aggregator1.MergeTensors({&ordinals_for_merge, &aggregator2_result},
+                               aggregator2_num_inputs),
+      IsOk());
   EXPECT_THAT(aggregator1.CanReport(), IsTrue());
   EXPECT_THAT(aggregator1.GetNumInputs(), Eq(3));
 
@@ -423,12 +563,13 @@ TEST(OneDimGroupingAggregatorTest, Merge_OtherOutputHasFewerElements_Succeeds) {
   EXPECT_THAT(result, IsOk());
   EXPECT_THAT(result.value().size(), Eq(1));
   // Verify the resulting tensor.
-  EXPECT_THAT(result.value()[0], IsTensor({5}, {32, 11, 29, 4, 2}));
+  EXPECT_THAT(result.value()[0], IsTensor({5}, {32, 25, 15, 4, 2}));
   // Also ensure that the resulting tensor is dense.
   EXPECT_TRUE(result.value()[0].is_dense());
 }
 
-TEST(OneDimGroupingAggregatorTest, Merge_OtherOutputHasMoreElements_Succeeds) {
+TEST_P(OneDimGroupingAggregatorTest,
+       Merge_OtherOutputHasMoreElements_Succeeds) {
   SumGroupingAggregator<int32_t> aggregator1;
   SumGroupingAggregator<int32_t> aggregator2;
 
@@ -455,7 +596,23 @@ TEST(OneDimGroupingAggregatorTest, Merge_OtherOutputHasMoreElements_Succeeds) {
   EXPECT_THAT(aggregator2.Accumulate({&t3_ordinals, &t3}), IsOk());
   // aggregator2 totals: [0, 20, 14, 0, 0, 7]
 
-  EXPECT_THAT(aggregator1.MergeWith(std::move(aggregator2)), IsOk());
+  if (GetParam()) {
+    auto state1 = std::move(aggregator1).ToProto();
+    aggregator1 = SumGroupingAggregator<int32_t>::FromProto(state1);
+    auto state2 = std::move(aggregator2).ToProto();
+    aggregator2 = SumGroupingAggregator<int32_t>::FromProto(state2);
+  }
+
+  int aggregator2_num_inputs = aggregator2.GetNumInputs();
+  auto aggregator2_result =
+      std::move(std::move(aggregator2).Report().value()[0]);
+  auto ordinals_for_merge =
+      Tensor::Create(DT_INT64, {6}, CreateTestData<int64_t>({1, 3, 5, 0, 2, 4}))
+          .value();
+  EXPECT_THAT(
+      aggregator1.MergeTensors({&ordinals_for_merge, &aggregator2_result},
+                               aggregator2_num_inputs),
+      IsOk());
   EXPECT_THAT(aggregator1.CanReport(), IsTrue());
   EXPECT_THAT(aggregator1.GetNumInputs(), Eq(3));
 
@@ -463,13 +620,13 @@ TEST(OneDimGroupingAggregatorTest, Merge_OtherOutputHasMoreElements_Succeeds) {
   EXPECT_THAT(result, IsOk());
   EXPECT_THAT(result.value().size(), Eq(1));
   // Verify the resulting tensor.
-  EXPECT_THAT(result.value()[0], IsTensor({6}, {32, 31, 29, 4, 2, 7}));
+  EXPECT_THAT(result.value()[0], IsTensor({6}, {32, 11, 15, 24, 9, 14}));
   // Also ensure that the resulting tensor is dense.
   EXPECT_TRUE(result.value()[0].is_dense());
 }
 
-TEST(OneDimGroupingAggregatorTest,
-     Merge_OtherOutputHasMoreElements_NonzeroDefaultValue_Succeeds) {
+TEST_P(OneDimGroupingAggregatorTest,
+       Merge_OtherOutputHasMoreElements_NonzeroDefaultValue_Succeeds) {
   // Use a MinGroupingAggregator which has a non-zero default value so we can
   // test that when the output grows, elements are set to the default value.
   MinGroupingAggregator aggregator1;
@@ -496,7 +653,23 @@ TEST(OneDimGroupingAggregatorTest,
   EXPECT_THAT(aggregator2.Accumulate({&t3_ordinals, &t3}), IsOk());
   // aggregator2 totals: [-50, 7, 11, INT_MAX, 2]
 
-  EXPECT_THAT(aggregator1.MergeWith(std::move(aggregator2)), IsOk());
+  if (GetParam()) {
+    auto state1 = std::move(aggregator1).ToProto();
+    aggregator1 = MinGroupingAggregator::FromProto(state1);
+    auto state2 = std::move(aggregator2).ToProto();
+    aggregator2 = MinGroupingAggregator::FromProto(state2);
+  }
+
+  int aggregator2_num_inputs = aggregator2.GetNumInputs();
+  auto aggregator2_result =
+      std::move(std::move(aggregator2).Report().value()[0]);
+  auto ordinals_for_merge =
+      Tensor::Create(DT_INT64, {5}, CreateTestData<int64_t>({4, 3, 2, 1, 0}))
+          .value();
+  EXPECT_THAT(
+      aggregator1.MergeTensors({&ordinals_for_merge, &aggregator2_result},
+                               aggregator2_num_inputs),
+      IsOk());
   EXPECT_THAT(aggregator1.CanReport(), IsTrue());
   EXPECT_THAT(aggregator1.GetNumInputs(), Eq(3));
 
@@ -504,7 +677,7 @@ TEST(OneDimGroupingAggregatorTest,
   EXPECT_THAT(result, IsOk());
   EXPECT_THAT(result.value().size(), Eq(1));
   // Verify the resulting tensor.
-  EXPECT_THAT(result.value()[0], IsTensor({5}, {-50, 7, -17, INT_MAX, 2}));
+  EXPECT_THAT(result.value()[0], IsTensor({5}, {2, INT_MAX, -17, 7, -50}));
   // Also ensure that the resulting tensor is dense.
   EXPECT_TRUE(result.value()[0].is_dense());
 }
@@ -549,15 +722,31 @@ TEST(OneDimGroupingAggregatorTest,
 TEST(OneDimGroupingAggregatorTest, Merge_IncompatibleDataType) {
   SumGroupingAggregator<int32_t> aggregator1;
   SumGroupingAggregator<float> aggregator2;
-  EXPECT_THAT(aggregator1.MergeWith(std::move(aggregator2)),
-              IsCode(INVALID_ARGUMENT));
+
+  auto empty_ordinals =
+      Tensor::Create(DT_INT64, {0}, CreateTestData<int64_t>({})).value();
+  int aggregator2_num_inputs = aggregator2.GetNumInputs();
+  auto aggregator2_result =
+      std::move(std::move(aggregator2).Report().value()[0]);
+  Status s = aggregator1.MergeTensors({&empty_ordinals, &aggregator2_result},
+                                      aggregator2_num_inputs);
+  EXPECT_THAT(s, IsCode(INVALID_ARGUMENT));
+  EXPECT_THAT(s.message(), HasSubstr("dtype mismatch"));
 }
 
 TEST(OneDimGroupingAggregatorTest, Merge_IncompatibleInputDataType) {
   SumGroupingAggregator<int32_t, int64_t> aggregator1;
-  SumGroupingAggregator<int64_t> aggregator2;
-  EXPECT_THAT(aggregator1.MergeWith(std::move(aggregator2)),
-              IsCode(INVALID_ARGUMENT));
+  SumGroupingAggregator<int32_t> aggregator2;
+
+  auto empty_ordinals =
+      Tensor::Create(DT_INT64, {0}, CreateTestData<int64_t>({})).value();
+  int aggregator2_num_inputs = aggregator2.GetNumInputs();
+  auto aggregator2_result =
+      std::move(std::move(aggregator2).Report().value()[0]);
+  Status s = aggregator1.MergeTensors({&empty_ordinals, &aggregator2_result},
+                                      aggregator2_num_inputs);
+  EXPECT_THAT(s, IsCode(INVALID_ARGUMENT));
+  EXPECT_THAT(s.message(), HasSubstr("dtype mismatch"));
 }
 
 TEST(OneDimGroupingAggregatorTest, FailsAfterBeingConsumed) {
@@ -575,14 +764,19 @@ TEST(OneDimGroupingAggregatorTest, FailsAfterBeingConsumed) {
               IsCode(FAILED_PRECONDITION));           // NOLINT
   EXPECT_THAT(aggregator.Accumulate({&ordinal, &t}),  // NOLINT
               IsCode(FAILED_PRECONDITION));
-  EXPECT_THAT(aggregator.MergeWith(SumGroupingAggregator<int32_t>()),  // NOLINT
-              IsCode(FAILED_PRECONDITION));
-
-  // Passing this aggregator as an argument to another MergeWith must fail too.
-  SumGroupingAggregator<int32_t> aggregator2;
-  EXPECT_THAT(aggregator2.MergeWith(std::move(aggregator)),  // NOLINT
-              IsCode(FAILED_PRECONDITION));
 }
+
+TEST(OneDimGroupingAggregatorTest, Serialize_Unimplmeneted) {
+  SumGroupingAggregator<int32_t> aggregator;
+  Status s = std::move(aggregator).Serialize().status();
+  EXPECT_THAT(s, IsCode(UNIMPLEMENTED));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OneDimGroupingAggregatorTestInstantiation, OneDimGroupingAggregatorTest,
+    testing::ValuesIn<bool>({false, true}),
+    [](const testing::TestParamInfo<OneDimGroupingAggregatorTest::ParamType>&
+           info) { return info.param ? "SaveIntermediateState" : "None"; });
 
 }  // namespace
 }  // namespace aggregation

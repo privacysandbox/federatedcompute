@@ -25,9 +25,12 @@
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/strings/str_cat.h"
 #include "fcp/aggregation/core/agg_vector.h"
 #include "fcp/aggregation/core/datatype.h"
+#include "fcp/aggregation/core/dp_fedsql_constants.h"
 #include "fcp/aggregation/core/intrinsic.h"
+#include "fcp/aggregation/core/one_dim_grouping_aggregator.h"
 #include "fcp/aggregation/core/tensor.h"
 #include "fcp/aggregation/core/tensor.pb.h"
 #include "fcp/aggregation/core/tensor_aggregator_registry.h"
@@ -86,6 +89,9 @@ namespace {
 using ::testing::Eq;
 using ::testing::HasSubstr;
 using ::testing::IsTrue;
+using testing::TestWithParam;
+
+using DPGroupingFederatedSumTest = TestWithParam<bool>;
 
 TensorSpec CreateTensorSpec(std::string name, DataType dtype) {
   return TensorSpec(name, dtype, {-1});
@@ -122,7 +128,7 @@ std::vector<Tensor> CreateDPGFSParameters(InputType linfinity_bound,
 
 TEST(DPGroupingFederatedSumTest, CatchInvalidNormType) {
   Intrinsic intrinsic1{
-      "GoogleSQL:dp_sum",
+      kDPSumUri,
       {CreateTensorSpec("value", DT_INT64)},
       {CreateTensorSpec("value", DT_INT64)},
       {CreateGenericDPGFSParameters<string_view, double, double>("x", -1, -1)},
@@ -134,7 +140,7 @@ TEST(DPGroupingFederatedSumTest, CatchInvalidNormType) {
               HasSubstr("numerical Tensors"));
 
   Intrinsic intrinsic2{
-      "GoogleSQL:dp_sum",
+      kDPSumUri,
       {CreateTensorSpec("value", DT_INT64)},
       {CreateTensorSpec("value", DT_INT64)},
       {CreateGenericDPGFSParameters<int64_t, string_view, double>(10, "x", -1)},
@@ -146,7 +152,7 @@ TEST(DPGroupingFederatedSumTest, CatchInvalidNormType) {
               HasSubstr("numerical Tensors"));
 
   Intrinsic intrinsic3{
-      "GoogleSQL:dp_sum",
+      kDPSumUri,
       {CreateTensorSpec("value", DT_INT64)},
       {CreateTensorSpec("value", DT_INT64)},
       {CreateGenericDPGFSParameters<int64_t, double, string_view>(10, -1, "x")},
@@ -159,7 +165,7 @@ TEST(DPGroupingFederatedSumTest, CatchInvalidNormType) {
 }
 
 TEST(DPGroupingFederatedSumTest, CatchInvalidNormValues) {
-  Intrinsic intrinsic{"GoogleSQL:dp_sum",
+  Intrinsic intrinsic{kDPSumUri,
                       {CreateTensorSpec("value", DT_INT64)},
                       {CreateTensorSpec("value", DT_INT64)},
                       {CreateDPGFSParameters<int64_t>(-1, -1, -1)},
@@ -172,7 +178,7 @@ TEST(DPGroupingFederatedSumTest, CatchInvalidNormValues) {
 }
 
 Intrinsic CreateDefaultIntrinsic() {
-  return Intrinsic{"GoogleSQL:dp_sum",
+  return Intrinsic{kDPSumUri,
                    {CreateTensorSpec("value", DT_INT32)},
                    {CreateTensorSpec("value", DT_INT64)},
                    {CreateDPGFSParameters<int32_t>(1000, -1, -1)},
@@ -192,7 +198,7 @@ inline void MatchSum(InputType linfinity_bound, double l1_bound,
   DataType output_type = internal::TypeTraits<OutputType>::kDataType;
 
   Intrinsic intrinsic{
-      "GoogleSQL:dp_sum",
+      kDPSumUri,
       {CreateTensorSpec("value", input_type)},
       {CreateTensorSpec("value", output_type)},
       {CreateDPGFSParameters<InputType>(linfinity_bound, l1_bound, l2_bound)},
@@ -510,19 +516,43 @@ TEST_F(ContributionBoundingTester, AllBoundingSucceeds) {
 }
 
 // Test merge w/ scalar input (duplicated from grouping_federated_sum_test.cc).
-TEST(DPGroupingFederatedSumTest, ScalarMergeSucceeds) {
+TEST_P(DPGroupingFederatedSumTest, ScalarMergeSucceeds) {
   auto aggregator1 = CreateTensorAggregator(CreateDefaultIntrinsic()).value();
   auto aggregator2 = CreateTensorAggregator(CreateDefaultIntrinsic()).value();
   Tensor ordinal =
-      Tensor::Create(DT_INT64, {}, CreateTestData<int64_t>({0})).value();
-  Tensor t1 = Tensor::Create(DT_INT32, {}, CreateTestData({1})).value();
-  Tensor t2 = Tensor::Create(DT_INT32, {}, CreateTestData({2})).value();
-  Tensor t3 = Tensor::Create(DT_INT32, {}, CreateTestData({3})).value();
+      Tensor::Create(DT_INT64, {1}, CreateTestData<int64_t>({0})).value();
+  Tensor t1 = Tensor::Create(DT_INT32, {1}, CreateTestData({1})).value();
+  Tensor t2 = Tensor::Create(DT_INT32, {1}, CreateTestData({2})).value();
+  Tensor t3 = Tensor::Create(DT_INT32, {1}, CreateTestData({3})).value();
   EXPECT_THAT(aggregator1->Accumulate({&ordinal, &t1}), IsOk());
   EXPECT_THAT(aggregator2->Accumulate({&ordinal, &t2}), IsOk());
   EXPECT_THAT(aggregator2->Accumulate({&ordinal, &t3}), IsOk());
 
-  EXPECT_THAT(aggregator1->MergeWith(std::move(*aggregator2)), IsOk());
+  if (GetParam()) {
+    auto factory = dynamic_cast<const OneDimBaseGroupingAggregatorFactory*>(
+        GetAggregatorFactory(CreateDefaultIntrinsic().uri).value());
+    auto one_dim_base_aggregator1 =
+        std::unique_ptr<OneDimBaseGroupingAggregator>(
+            dynamic_cast<OneDimBaseGroupingAggregator*>(aggregator1.release()));
+    auto state = std::move(*(one_dim_base_aggregator1)).ToProto();
+    aggregator1 = factory->FromProto(CreateDefaultIntrinsic(), state).value();
+    auto one_dim_base_aggregator2 =
+        std::unique_ptr<OneDimBaseGroupingAggregator>(
+            dynamic_cast<OneDimBaseGroupingAggregator*>(aggregator2.release()));
+    auto state2 = std::move(*(one_dim_base_aggregator2)).ToProto();
+    aggregator2 = factory->FromProto(CreateDefaultIntrinsic(), state2).value();
+  }
+
+  int aggregator2_num_inputs = aggregator2->GetNumInputs();
+  auto aggregator2_result =
+      std::move(std::move(*aggregator2).Report().value()[0]);
+  auto ordinals_for_merge =
+      Tensor::Create(DT_INT64, {1}, CreateTestData<int64_t>({0})).value();
+  EXPECT_THAT((dynamic_cast<OneDimGroupingAggregator<int32_t, int64_t>*>(
+                   aggregator1.get()))
+                  ->MergeTensors({&ordinals_for_merge, &aggregator2_result},
+                                 aggregator2_num_inputs),
+              IsOk());
   EXPECT_THAT(aggregator1->CanReport(), IsTrue());
   EXPECT_THAT(aggregator1->GetNumInputs(), Eq(3));
 
@@ -533,8 +563,66 @@ TEST(DPGroupingFederatedSumTest, ScalarMergeSucceeds) {
   EXPECT_THAT(result.value()[0], IsTensor({1}, {expected_sum}));
 }
 
+// Test merge w/ scalar input ignores norm bounding.
+TEST_P(DPGroupingFederatedSumTest, ScalarMergeIgnoresNormBounding) {
+  Intrinsic intrinsic_with_norm_bounding =
+      Intrinsic{kDPSumUri,
+                {CreateTensorSpec("value", DT_INT32)},
+                {CreateTensorSpec("value", DT_INT64)},
+                {CreateDPGFSParameters<int32_t>(10, -1, -1)},
+                {}};
+  auto aggregator1 =
+      CreateTensorAggregator(intrinsic_with_norm_bounding).value();
+  auto aggregator2 =
+      CreateTensorAggregator(intrinsic_with_norm_bounding).value();
+  Tensor ordinal =
+      Tensor::Create(DT_INT64, {1}, CreateTestData<int64_t>({0})).value();
+  Tensor t1 = Tensor::Create(DT_INT32, {1}, CreateTestData({12})).value();
+  Tensor t2 = Tensor::Create(DT_INT32, {1}, CreateTestData({5})).value();
+  Tensor t3 = Tensor::Create(DT_INT32, {1}, CreateTestData({11})).value();
+  EXPECT_THAT(aggregator1->Accumulate({&ordinal, &t1}), IsOk());
+  EXPECT_THAT(aggregator2->Accumulate({&ordinal, &t2}), IsOk());
+  EXPECT_THAT(aggregator2->Accumulate({&ordinal, &t3}), IsOk());
+
+  if (GetParam()) {
+    auto factory = dynamic_cast<const OneDimBaseGroupingAggregatorFactory*>(
+        GetAggregatorFactory(intrinsic_with_norm_bounding.uri).value());
+    auto one_dim_base_aggregator1 =
+        std::unique_ptr<OneDimBaseGroupingAggregator>(
+            dynamic_cast<OneDimBaseGroupingAggregator*>(aggregator1.release()));
+    auto state = std::move(*(one_dim_base_aggregator1)).ToProto();
+    aggregator1 =
+        factory->FromProto(intrinsic_with_norm_bounding, state).value();
+    auto one_dim_base_aggregator2 =
+        std::unique_ptr<OneDimBaseGroupingAggregator>(
+            dynamic_cast<OneDimBaseGroupingAggregator*>(aggregator2.release()));
+    auto state2 = std::move(*(one_dim_base_aggregator2)).ToProto();
+    aggregator2 =
+        factory->FromProto(intrinsic_with_norm_bounding, state2).value();
+  }
+
+  int aggregator2_num_inputs = aggregator2->GetNumInputs();
+  auto aggregator2_result =
+      std::move(std::move(*aggregator2).Report().value()[0]);
+  auto ordinals_for_merge =
+      Tensor::Create(DT_INT64, {1}, CreateTestData<int64_t>({0})).value();
+  EXPECT_THAT((dynamic_cast<OneDimGroupingAggregator<int32_t, int64_t>*>(
+                   aggregator1.get()))
+                  ->MergeTensors({&ordinals_for_merge, &aggregator2_result},
+                                 aggregator2_num_inputs),
+              IsOk());
+  EXPECT_THAT(aggregator1->CanReport(), IsTrue());
+  EXPECT_THAT(aggregator1->GetNumInputs(), Eq(3));
+
+  auto result = std::move(*aggregator1).Report();
+  EXPECT_THAT(result, IsOk());
+  EXPECT_THAT(result.value().size(), Eq(1));
+  int64_t expected_sum = 25;
+  EXPECT_THAT(result.value()[0], IsTensor({1}, {expected_sum}));
+}
+
 // Test merge w/ vector input
-TEST(DPGroupingFederatedSumTest, VectorMergeSucceeds) {
+TEST_P(DPGroupingFederatedSumTest, VectorMergeSucceeds) {
   auto aggregator1 = CreateTensorAggregator(CreateDefaultIntrinsic()).value();
   Tensor alice_ordinal =
       Tensor::Create(DT_INT64, {4}, CreateTestData<int64_t>({0, 1, 2, 1}))
@@ -547,7 +635,9 @@ TEST(DPGroupingFederatedSumTest, VectorMergeSucceeds) {
   Tensor bob_values =
       Tensor::Create(DT_INT32, {3}, CreateTestData<int32_t>({9, -12, 2}))
           .value();
+  // After accumulating Alice's data: [3, 5, 4]
   EXPECT_THAT(aggregator1->Accumulate({&alice_ordinal, &alice_values}), IsOk());
+  // After accumulating Bob's data: [3, -5, 13]
   EXPECT_THAT(aggregator1->Accumulate({&bob_ordinal, &bob_values}), IsOk());
 
   auto aggregator2 = CreateTensorAggregator(CreateDefaultIntrinsic()).value();
@@ -556,17 +646,64 @@ TEST(DPGroupingFederatedSumTest, VectorMergeSucceeds) {
   Tensor cindy_values =
       Tensor::Create(DT_INT32, {3}, CreateTestData<int32_t>({11, -5, 5}))
           .value();
+  // After accumulating Cindy's data: [5, -5, 0, 11]
   EXPECT_THAT(aggregator2->Accumulate({&cindy_ordinal, &cindy_values}), IsOk());
 
-  EXPECT_THAT(aggregator1->MergeWith(std::move(*aggregator2)), IsOk());
+  if (GetParam()) {
+    auto factory = dynamic_cast<const OneDimBaseGroupingAggregatorFactory*>(
+        GetAggregatorFactory(CreateDefaultIntrinsic().uri).value());
+    auto one_dim_base_aggregator1 =
+        std::unique_ptr<OneDimBaseGroupingAggregator>(
+            dynamic_cast<OneDimBaseGroupingAggregator*>(aggregator1.release()));
+    auto state = std::move(*(one_dim_base_aggregator1)).ToProto();
+    aggregator1 = factory->FromProto(CreateDefaultIntrinsic(), state).value();
+    auto one_dim_base_aggregator2 =
+        std::unique_ptr<OneDimBaseGroupingAggregator>(
+            dynamic_cast<OneDimBaseGroupingAggregator*>(aggregator2.release()));
+    auto state2 = std::move(*(one_dim_base_aggregator2)).ToProto();
+    aggregator2 = factory->FromProto(CreateDefaultIntrinsic(), state2).value();
+  }
+
+  int aggregator2_num_inputs = aggregator2->GetNumInputs();
+  auto aggregator2_result =
+      std::move(std::move(*aggregator2).Report().value()[0]);
+  auto ordinals_for_merge =
+      Tensor::Create(DT_INT64, {4}, CreateTestData<int64_t>({1, 4, 2, 0}))
+          .value();
+  EXPECT_THAT((dynamic_cast<OneDimGroupingAggregator<int32_t, int64_t>*>(
+                   aggregator1.get()))
+                  ->MergeTensors({&ordinals_for_merge, &aggregator2_result},
+                                 aggregator2_num_inputs),
+              IsOk());
   EXPECT_THAT(aggregator1->CanReport(), IsTrue());
   EXPECT_THAT(aggregator1->GetNumInputs(), Eq(3));
 
   auto result = std::move(*aggregator1).Report();
   EXPECT_THAT(result, IsOk());
   EXPECT_THAT(result.value().size(), Eq(1));
-  std::initializer_list<int64_t> expected_sum = {8, -10, 13, 11};
-  EXPECT_THAT(result.value()[0], IsTensor({4}, expected_sum));
+  std::initializer_list<int64_t> expected_sum = {14, 0, 13, 0, -5};
+  EXPECT_THAT(result.value()[0], IsTensor({5}, expected_sum));
+}
+
+// The tests so far have set (input type, output type) to (int32, int64) or
+// (float, double) or (int64, int64) or (double, double). Now we ensure that we
+// can create aggregators for (int32, int32) and (float, float)
+TEST(DPGroupingFederatedSumTest, CreateMatchingInputAndOutputDataType) {
+  Intrinsic intrinsic_int32{kDPSumUri,
+                            {TensorSpec{"foo", DT_INT32, {}}},
+                            {TensorSpec{"foo_out", DT_INT32, {}}},
+                            {CreateDPGFSParameters<int32_t>(1000, -1, -1)},
+                            {}};
+  Status s = CreateTensorAggregator(intrinsic_int32).status();
+  EXPECT_OK(s);
+
+  Intrinsic intrinsic_float{kDPSumUri,
+                            {TensorSpec{"foo", DT_FLOAT, {}}},
+                            {TensorSpec{"foo_out", DT_FLOAT, {}}},
+                            {CreateDPGFSParameters<float>(1000, -1, -1)},
+                            {}};
+  s = CreateTensorAggregator(intrinsic_float).status();
+  EXPECT_OK(s);
 }
 
 TEST(DPGroupingFederatedSumTest, CreateWrongUri) {
@@ -576,15 +713,15 @@ TEST(DPGroupingFederatedSumTest, CreateWrongUri) {
                 {TensorSpec{"foo_out", DT_INT32, {}}},
                 {CreateDPGFSParameters<int64_t>(1000, -1, -1)},
                 {}};
-  EXPECT_DEATH(Status s = (*GetAggregatorFactory("GoogleSQL:dp_sum"))
-                              ->Create(intrinsic)
-                              .status(),
-               HasSubstr("Check failed: kGoogleSqlDPSumUri == intrinsic.uri."));
+  auto lhs = absl::StrCat("Expected intrinsic URI ", kDPSumUri);
+  EXPECT_DEATH(
+      Status s = (*GetAggregatorFactory(kDPSumUri))->Create(intrinsic).status(),
+      HasSubstr(absl::StrCat(lhs, " but got uri wrong_uri")));
 }
 
 TEST(DPGroupingFederatedSumTest, CreateUnsupportedNumberOfInputs) {
   Intrinsic intrinsic = Intrinsic{
-      "GoogleSQL:dp_sum",
+      kDPSumUri,
       {TensorSpec{"foo", DT_INT32, {}}, TensorSpec{"bar", DT_INT32, {}}},
       {TensorSpec{"foo_out", DT_INT32, {}}},
       {CreateDPGFSParameters<int64_t>(1000, -1, -1)},
@@ -596,8 +733,8 @@ TEST(DPGroupingFederatedSumTest, CreateUnsupportedNumberOfInputs) {
 
 TEST(DPGroupingFederatedSumTest, CreateUnsupportedEmptyIntrinsic) {
   Status s =
-      (*GetAggregatorFactory("GoogleSQL:dp_sum"))
-          ->Create(Intrinsic{"GoogleSQL:dp_sum",
+      (*GetAggregatorFactory(kDPSumUri))
+          ->Create(Intrinsic{kDPSumUri,
                              {},
                              {},
                              {CreateDPGFSParameters<int64_t>(1000, -1, -1)},
@@ -608,7 +745,7 @@ TEST(DPGroupingFederatedSumTest, CreateUnsupportedEmptyIntrinsic) {
 }
 
 TEST(DPGroupingFederatedSumTest, CreateUnsupportedNumberOfOutputs) {
-  Intrinsic intrinsic{"GoogleSQL:dp_sum",
+  Intrinsic intrinsic{kDPSumUri,
                       {TensorSpec{"foo", DT_INT32, {}}},
                       {TensorSpec{"foo_out", DT_INT32, {}},
                        TensorSpec{"bar_out", DT_INT32, {}}},
@@ -621,7 +758,7 @@ TEST(DPGroupingFederatedSumTest, CreateUnsupportedNumberOfOutputs) {
 
 TEST(DPGroupingFederatedSumTest,
      CreateUnsupportedUnmatchingInputAndOutputDataType) {
-  Intrinsic intrinsic{"GoogleSQL:dp_sum",
+  Intrinsic intrinsic{kDPSumUri,
                       {TensorSpec{"foo", DT_INT32, {}}},
                       {TensorSpec{"foo_out", DT_FLOAT, {}}},
                       {CreateDPGFSParameters<int64_t>(1000, -1, -1)},
@@ -635,7 +772,7 @@ TEST(DPGroupingFederatedSumTest,
 TEST(DPGroupingFederatedSumTest,
      CreateUnsupportedUnmatchingInputAndOutputShape) {
   Intrinsic intrinsic =
-      Intrinsic{"GoogleSQL:dp_sum",
+      Intrinsic{kDPSumUri,
                 {TensorSpec{"foo", DT_INT32, {1}}},
                 {TensorSpec{"foo", DT_INT32, {2}}},
                 {CreateDPGFSParameters<int64_t>(1000, -1, -1)},
@@ -647,13 +784,13 @@ TEST(DPGroupingFederatedSumTest,
 }
 
 TEST(DPGroupingFederatedSumTest, CreateUnsupportedNestedIntrinsic) {
-  Intrinsic inner = Intrinsic{"GoogleSQL:dp_sum",
+  Intrinsic inner = Intrinsic{kDPSumUri,
                               {TensorSpec{"foo", DT_INT32, {8}}},
                               {TensorSpec{"foo_out", DT_INT32, {16}}},
                               {CreateDPGFSParameters<int64_t>(1000, -1, -1)},
                               {}};
   Intrinsic intrinsic =
-      Intrinsic{"GoogleSQL:dp_sum",
+      Intrinsic{kDPSumUri,
                 {TensorSpec{"bar", DT_INT32, {1}}},
                 {TensorSpec{"bar_out", DT_INT32, {2}}},
                 {CreateDPGFSParameters<int64_t>(1000, -1, -1)},
@@ -666,26 +803,26 @@ TEST(DPGroupingFederatedSumTest, CreateUnsupportedNestedIntrinsic) {
 }
 
 TEST(DPGroupingFederatedSumTest, CatchUnsupportedStringType) {
-  Intrinsic intrinsic{"GoogleSQL:dp_sum",
+  Intrinsic intrinsic{kDPSumUri,
                       {CreateTensorSpec("value", DT_STRING)},
                       {CreateTensorSpec("value", DT_STRING)},
-                      {CreateDPGFSParameters<string_view>("hello", -1, -1)},
+                      {CreateDPGFSParameters<int64_t>(1000, -1, -1)},
                       {}};
   Status s = CreateTensorAggregator(intrinsic).status();
   EXPECT_THAT(s, IsCode(INVALID_ARGUMENT));
   EXPECT_THAT(s.message(), HasSubstr("only supports numeric datatypes"));
 }
 
-TEST(DPGroupingFederatedSumTest, CatchUnsupportedNumericType) {
-  Intrinsic intrinsic{"GoogleSQL:dp_sum",
-                      {CreateTensorSpec("value", DT_UINT64)},
-                      {CreateTensorSpec("value", DT_UINT64)},
-                      {CreateDPGFSParameters<uint64_t>(1000, -1, -1)},
-                      {}};
-  Status s = CreateTensorAggregator(intrinsic).status();
-  EXPECT_THAT(s, IsCode(INVALID_ARGUMENT));
-  EXPECT_THAT(s.message(), HasSubstr("does not support"));
+TEST(DPGroupingFederatedSumTest, Deserialize_Unimplemented) {
+  Status s = DeserializeTensorAggregator(CreateDefaultIntrinsic(), "").status();
+  EXPECT_THAT(s, IsCode(UNIMPLEMENTED));
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    DPGroupingFederatedSumTestInstantiation, DPGroupingFederatedSumTest,
+    testing::ValuesIn<bool>({false, true}),
+    [](const testing::TestParamInfo<DPGroupingFederatedSumTest::ParamType>&
+           info) { return info.param ? "SerializeDeserialize" : "None"; });
 
 }  // namespace
 }  // namespace aggregation

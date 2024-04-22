@@ -45,10 +45,6 @@ class Flags {
   // running native execution to be forcibly resolved or continue indefinitely.
   virtual int64_t tf_execution_teardown_extended_period_millis() const = 0;
 
-  // The deadline in seconds for the gRPC channel used for communication
-  // between the client and server.
-  virtual int64_t grpc_channel_deadline_seconds() const = 0;
-
   // Whether to log the error message strings from TensorFlow exceptions.
   virtual bool log_tensorflow_error_messages() const = 0;
 
@@ -120,17 +116,6 @@ class Flags {
   // force the legacy TFMobile code path to be used instead.
   virtual bool use_tflite_training() const { return true; }
 
-  // Whether to enable support for downloading plan/initial checkpoint resources
-  // via HTTP, while still using gRPC for the main protocol.
-  virtual bool enable_grpc_with_http_resource_support() const { return false; }
-
-  // Whether to enable support for downloading eligibility eval plan/initial
-  // checkpoint resources via HTTP, while still using gRPC for the main
-  // protocol.
-  virtual bool enable_grpc_with_eligibility_eval_http_resource_support() const {
-    return false;
-  }
-
   // When true, TFLite interpreter will use dynamic memory allocation, and
   // release the memory for tensors that are no longer needed.
   virtual bool ensure_dynamic_tensors_are_released() const { return true; }
@@ -146,11 +131,14 @@ class Flags {
   // delegate nodes together is disabled.
   virtual bool disable_tflite_delegate_clustering() const { return false; }
 
+  // When true, we'll use  use TFLite's BuiltinOpResolver (as opposed to
+  // BuiltinOpResolverWithoutDefaultDelegates).
+  virtual bool tflite_use_builtin_op_resolver_with_default_delegates() const {
+    return false;
+  }
+
   // When true, http request body won't be compressed.
   virtual bool disable_http_request_body_compression() const { return false; }
-
-  // When true, HTTP Federated Compute protocol is used.
-  virtual bool use_http_federated_compute_protocol() const { return false; }
 
   // When true, the client computes the task identity to pass in
   // SelectorContext.
@@ -165,11 +153,10 @@ class Flags {
   virtual bool enable_federated_select() const { return false; }
 
   // The max size in bytes of resources that the ResourceCache is allowed to
-  // store. If greater than 0, the client will attempt to cache resources sent
-  // by uri via the hybrid grpc-with-http-resources and the full http stack. If
-  // this value is reduced from some previous greater value, the cache dir will
-  // be reduced appropriately the next time it is initialized at the start of
-  // the next run.
+  // store. If greater than 0, the client will attempt to cache resources that
+  // it downloads via HTTP URIs. If this value is reduced from some previous
+  // greater value, the cache dir will be reduced appropriately the next time it
+  // is initialized at the start of the next run.
   virtual int64_t max_resource_cache_size_bytes() const { return 0; }
 
   // If true, an error during the initialization of the resource cache will
@@ -202,23 +189,6 @@ class Flags {
   // If true, log the first access time for each collection to opstats.
   virtual bool log_collection_first_access_time() const { return false; }
 
-  // If true, issue single task assignment only when the
-  // EligibilityPopulationSpec indicates the population supports single task
-  // assignment, or when the EligibilityPopulationSpec is missing.
-  virtual bool check_eligibility_population_spec_before_checkin() const {
-    return false;
-  }
-
-  // If true, then TASK_ASSIGNMENT_MODE_UNSPECIFIED will be treated as
-  // TASK_ASSIGNMENT_MODE_SINGLE.
-  virtual bool task_assignment_mode_treat_unspecified_as_single() const {
-    return false;
-  }
-
-  // If true, a callback will be called when a task completes.  For multiple
-  // task assignments, the callback could be called multiple times.
-  virtual bool enable_task_completion_callback() const { return false; }
-
   // If true, example query recording will happen in the native code. But if
   // enable_task_completion_callback is false, the recorded data won't be used.
   virtual bool enable_native_example_query_recording() const { return false; }
@@ -229,19 +199,18 @@ class Flags {
   // If true, enables MinimumSeparationPolicy for clients.
   virtual bool enable_minimum_separation_policy() const { return false; }
 
-  // If true, then TfLitePlanEngine will invoke TFLite in a thread safe manner.
-  // That is, it will only invoke TFLite APIs from a single thread, rather than
-  // calling some initialization APIs from one thread and then invoking the
-  // interpreter on another thread. This is safer, and more in line with
-  // TFLite's intended invocation patter.
-  virtual bool use_thread_safe_tflite_wrapper() const { return false; }
-
   // If true, the client will generate computation IDs by actually calculating a
   // SHA256 hash correctly, whereas it calculated the hash only over the first 4
   // bytes before this change.
   virtual bool use_correct_sha256_impl_for_computation_id() const {
     return false;
   }
+
+  // If true, and if a population has tasks which only use native policies and
+  // no TensorFlow-based eligibility eval plan is deployed,
+  // HandleEligibilityEvalTaskResponse will return an EligibilityEvalTask
+  // instead of an EligibilityEvalDisabled result to fl_runner.
+  virtual bool native_only_eligibility_config_support() const { return false; }
 };
 }  // namespace client
 }  // namespace fcp
