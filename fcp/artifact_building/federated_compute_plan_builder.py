@@ -1597,7 +1597,7 @@ def _build_client_graph_with_tensorflow_spec(
         secagg_tensor_specs,
         experimental_checkpoint_write,
     )
-
+  client_phase.tensorflow_spec.example_selector.CopyFrom(dataspec.example_selector_proto)
   return client_graph.as_graph_def(), client_phase
 
 

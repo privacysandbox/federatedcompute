@@ -485,6 +485,10 @@ message TensorflowSpec {
   // Note: tensors specified via this message should not be included in
   // input_tensor_specs.
   map<string, tensorflow.TensorProto> constant_inputs = 5;
+
+  // The fields below are added by OnDevicePersonalization module.
+  // Specifies an example selection procedure.
+  ExampleSelector example_selector = 999;
 }
 
 // ExampleQuerySpec message describes client execution that issues example
