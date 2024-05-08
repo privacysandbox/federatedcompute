@@ -22,18 +22,16 @@
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/functional/any_invocable.h"
-#include "absl/functional/function_ref.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/cord.h"
-#include "absl/strings/string_view.h"
 #include "fcp/client/attestation/attestation_verifier.h"
 #include "fcp/confidentialcompute/cose.h"
 #include "fcp/protos/confidentialcompute/verification_record.pb.h"
 #include "fcp/protos/federatedcompute/confidential_aggregations.pb.h"
-#include "third_party/oak/proto/attestation/endorsement.pb.h"
-#include "third_party/oak/proto/attestation/evidence.pb.h"
-#include "third_party/oak/proto/attestation/reference_value.pb.h"
-#include "third_party/oak/proto/attestation/verification.pb.h"
+#include "proto/attestation/endorsement.pb.h"
+#include "proto/attestation/evidence.pb.h"
+#include "proto/attestation/reference_value.pb.h"
+#include "proto/attestation/verification.pb.h"
 
 namespace fcp::client::attestation {
 
@@ -69,32 +67,6 @@ class OakRustAttestationVerifier : public AttestationVerifier {
       const fcp::confidentialcompute::AttestationVerificationRecord&)>
       record_logger_;
 };
-
-// A verification record logger which simply logs the pretty printed
-// `AttestationVerificationRecord` to `FCP_LOG(INFO)`.
-//
-// Note: this is not intended for use in production, but is convenient for use
-// in tests etc.
-void LogPrettyPrintedVerificationRecord(
-    const fcp::confidentialcompute::AttestationVerificationRecord& record);
-
-// A verification record logger which serializes, compresses, and base64-encodes
-// the record before logging it to either `FCP_VLOG(1)` (non-Android builds) or
-// to Android Logcat using the DEBUG log level (for Android builds).
-void LogSerializedVerificationRecord(
-    const fcp::confidentialcompute::AttestationVerificationRecord& record);
-
-namespace internal {
-
-// A helper function that serializes, compresses, and base64-encodes the record
-// and chunks the result up into small chunks which are handed to the `logger`
-// for actual printing.
-void LogSerializedVerificationRecordWith(
-    const fcp::confidentialcompute::AttestationVerificationRecord& record,
-    absl::FunctionRef<void(absl::string_view message,
-                           bool enclose_with_brackets)>
-        logger);
-}  // namespace internal
 
 }  // namespace fcp::client::attestation
 
