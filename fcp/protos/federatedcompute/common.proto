@@ -92,6 +92,10 @@ message Resource {
   // client. Not set if `client_cache_id` is not set.
   google.protobuf.Duration max_age = 5;
 
+  // The compression used for resource, or unset if the data is
+  // uncompressed.
+  optional ResourceCompressionFormat compression_format = 999;
+
   reserved 2;
 }
 
