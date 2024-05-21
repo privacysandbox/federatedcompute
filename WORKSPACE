@@ -87,6 +87,7 @@ maven_install(
         "com.google.truth:truth:1.1.3",
         "junit:junit:4.13",
         "org.mockito:mockito-core:4.3.1",
+        "com.google.auto.value:auto-value:1.7.4",
     ],
     repositories = [
         "https://maven.google.com",

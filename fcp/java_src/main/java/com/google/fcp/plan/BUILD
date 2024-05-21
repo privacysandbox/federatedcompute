@@ -25,11 +25,30 @@ java_library(
         "TensorflowPlanSession.java",
     ],
     deps = [
-        "//fcp/java_src/main/java/com/google/fcp/tensorflow:tensorflow",
+        "//fcp/java_src/main/java/com/google/fcp/tensorflow",
         "//fcp/java_src/main/java/com/google/fcp/tensorflow:app_files",
         "//fcp/java_src/main/java/com/google/fcp/tensorflow:file_util",
         "//fcp/java_src/main/java/com/google/fcp/tensorflow:protos_all_java_proto",
         "//fcp/protos:plan_java_proto",
+        "@com_google_protobuf//java/core",
+        "@maven//:com_google_code_findbugs_jsr305",
+        "@maven//:com_google_guava_guava",
+    ],
+)
+
+java_library(
+    name = "phase_v2",
+    srcs = [
+        "PhaseSessionV2.java",
+        "TensorflowPhaseSessionV2.java",
+    ],
+    deps = [
+        "//fcp/java_src/main/java/com/google/fcp/tensorflow",
+        "//fcp/java_src/main/java/com/google/fcp/tensorflow:app_files",
+        "//fcp/java_src/main/java/com/google/fcp/tensorflow:file_util",
+        "//fcp/java_src/main/java/com/google/fcp/tensorflow:protos_all_java_proto",
+        "//fcp/protos:plan_java_proto",
+        "//third_party:autovalue",
         "@com_google_protobuf//java/core",
         "@maven//:com_google_code_findbugs_jsr305",
         "@maven//:com_google_guava_guava",

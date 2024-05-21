@@ -23,6 +23,7 @@ java_test(
         "//fcp/java_src/main/java/com/google/fcp/aggregation",
         "//fcp/java_src/main/java/com/google/fcp/aggregation:aggregation_exception",
         "//fcp/java_src/main/java/com/google/fcp/plan",
+        "//fcp/java_src/main/java/com/google/fcp/plan:phase_v2",
         "//fcp/java_src/main/java/com/google/fcp/tensorflow",
         "//fcp/java_src/main/java/com/google/fcp/tensorflow:app_files",
         "//fcp/java_src/main/java/com/google/fcp/tensorflow:protos_all_java_proto",
