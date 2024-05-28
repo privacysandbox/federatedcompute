@@ -16,7 +16,6 @@ package com.google.fcp.plan;
 import com.google.auto.value.AutoValue;
 import com.google.common.collect.ImmutableMap;
 import com.google.protobuf.ByteString;
-import org.tensorflow.framework.TensorProto;
 
 /** Objects that implement this interface execute the ServerPhaseV2 portion of a Plan object. */
 public interface PhaseSessionV2 {
@@ -50,10 +49,10 @@ public interface PhaseSessionV2 {
     public abstract static class Result {
         public abstract ByteString updatedServerState();
 
-        public abstract ImmutableMap<String, TensorProto> metrics();
+        public abstract ImmutableMap<String, Double> metrics();
 
         public static Result create(
-                ByteString updatedServerState, ImmutableMap<String, TensorProto> metrics) {
+                ByteString updatedServerState, ImmutableMap<String, Double> metrics) {
             return new AutoValue_PhaseSessionV2_Result(updatedServerState, metrics);
         }
     }

@@ -20,7 +20,6 @@ import java.util.Map;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-import org.tensorflow.framework.TensorProto;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
@@ -68,25 +67,25 @@ public class AggregationSessionTest {
     assertEquals(true, newCheckpoint.size() > 0);
 
     // Produce Metrics
-    Map<String, TensorProto> metrics = result.metrics();
+    Map<String, Double> metrics = result.metrics();
     assertEquals(
-        0.4957627, metrics.get("server/client_work/train/precision").getFloatVal(0), 0.000001);
+        0.4957627, metrics.get("server/client_work/train/precision"), 0.000001);
     assertEquals(
-        0.47855276, metrics.get("server/client_work/train/auc-roc").getFloatVal(0), 0.000001);
+        0.47855276, metrics.get("server/client_work/train/auc-roc"), 0.000001);
     assertEquals(
-        0.51270926, metrics.get("server/client_work/train/auc-pr").getFloatVal(0), 0.000001);
+        0.51270926, metrics.get("server/client_work/train/auc-pr"), 0.000001);
     assertEquals(
         0.46931407,
-        metrics.get("server/client_work/train/binary-accuracy").getFloatVal(0),
+        metrics.get("server/client_work/train/binary-accuracy"),
         0.000001);
     assertEquals(
         0.7109273,
-        metrics.get("server/client_work/train/binary-cross-entropy").getFloatVal(0),
+        metrics.get("server/client_work/train/binary-cross-entropy"),
         0.000001);
     assertEquals(
-        0.80689657, metrics.get("server/client_work/train/recall").getFloatVal(0), 0.000001);
-    assertEquals(0.71106434, metrics.get("server/client_work/train/loss").getFloatVal(0), 0.000001);
-    assertEquals(0, metrics.get("server/finalizer/update_non_finite").getIntVal(0), 0.000001);
+        0.80689657, metrics.get("server/client_work/train/recall"), 0.000001);
+    assertEquals(0.71106434, metrics.get("server/client_work/train/loss"), 0.000001);
+    assertEquals(0, metrics.get("server/finalizer/update_non_finite"), 0.000001);
 
     ByteString clientCheckpoint =
         new TensorflowPhaseSessionV2(ByteString.copyFrom(plan_bytes))

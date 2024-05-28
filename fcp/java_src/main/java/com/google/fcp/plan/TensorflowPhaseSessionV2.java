@@ -267,7 +267,7 @@ public class TensorflowPhaseSessionV2 implements PhaseSessionV2 {
                         outputMetrics.entrySet().stream()
                                 .collect(
                                         toImmutableMap(
-                                                entry -> getBareTensorName(entry.getKey()), Map.Entry::getValue)));
+                                                entry -> getBareTensorName(entry.getKey()), entry -> getTensorValueAsScalarDouble(entry.getValue()))));
             }
         } catch (Exception e) {
             throw new IllegalStateException(e);
@@ -295,5 +295,22 @@ public class TensorflowPhaseSessionV2 implements PhaseSessionV2 {
             return tensorName.substring(0, colon);
         }
         return tensorName;
+    }
+
+    private static double getTensorValueAsScalarDouble(TensorProto tensor) {
+        switch (tensor.getDtype()) {
+            case DT_FLOAT:
+                return tensor.getFloatVal(0);
+            case DT_DOUBLE:
+                return tensor.getDoubleVal(0);
+            case DT_INT32:
+                return tensor.getIntVal(0);
+            case DT_INT64:
+                return tensor.getInt64Val(0);
+            case DT_BOOL:
+                return tensor.getBoolVal(0) ? 1.0 : 0.0;
+            default:
+                return 0.0;
+        }
     }
 }
