@@ -175,6 +175,12 @@ message RejectionReason {
 
     // The device is not authenticated to the server.
     UNAUTHENTICATED = 3;
+
+    // The device version does not match the required versions specified by the server.
+    CLIENT_VERSION_MISMATCH = 4;
+
+    // No active task exists for the given population name.
+    NO_ACTIVE_TASK_EXISTS = 5;
   }
 }
 
